@@ -2,9 +2,7 @@ from M2Crypto import RSA, X509, EVP, m2
 
 import hashlib
 import hmac
-import struct
 import socket
-import ssl
 import sys
 
 HOST = "github.com"
