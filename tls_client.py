@@ -1,4 +1,4 @@
-from M2Crypto import RSA, X509, EVP
+from M2Crypto import RSA, X509, EVP, m2
 
 import hashlib
 import hmac
@@ -271,6 +271,9 @@ def validate_signature(rsa, client_random, server_random, dh_p, dh_g, dh_Ys, dh_
 
     encrypted_premaster = rsa.public_encrypt(md5_hash + sha_hash, RSA.pkcs1_oaep_padding)
 
+    # Dirty hack: M2Crypto have no md5+sha1 support. But openssl has it since 2002
+    # I filed a feature request to M2Crypto, but now we add explicitly md5_sha1 const in m2crypto
+    m2.NID_md5_sha1 = 114
     try:
         rsa.verify(md5_hash + sha_hash, num_to_bytes(dh_sign), algo="md5_sha1")
         return True
@@ -556,18 +559,23 @@ encrypted_msg = gen_encrypted_appdata_msg(encryptor, client_seq_num, client_writ
 send_tls(s, APPLICATION_DATA, encrypted_msg)
 client_seq_num += 1
 
-print("Receiving http answer")
+print("Receiving an answer")
 
 while True:
     rec_type, server_encrypted_msg = recv_tls(s)
     if rec_type == APPLICATION_DATA:
-        mac_is_valid, msg = handle_encrypted_appdata_msg(decryptor, server_seq_num, server_write_mac_key, server_encrypted_msg)
+        mac_is_valid, msg = handle_encrypted_appdata_msg(decryptor, server_seq_num,
+                                                         server_write_mac_key,
+                                                         server_encrypted_msg)
         server_seq_num += 1
         if not mac_is_valid:
             print("Mac is invalid!!!")
         print("Got: %s" % msg)
     elif rec_type == ALERT:
-        mac_is_valid, alert_level, alert_description = handle_encrypted_alert(decryptor, server_seq_num, server_write_mac_key, server_encrypted_msg)
+        mac_is_valid, alert_level, alert_description = handle_encrypted_alert(decryptor,
+                                                                              server_seq_num,
+                                                                              server_write_mac_key,
+                                                                              server_encrypted_msg)
         server_seq_num += 1
         if not mac_is_valid:
             print("Mac is invalid!!!")

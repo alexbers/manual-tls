@@ -4,7 +4,7 @@ A simple example of manual tls 1.0 connection with Diffie–Hellman key exchange
 
 ## Motivation ##
 
-This is educational project about cryptography. Please don't use it in your 
+This is educational project about cryptography. Please, don't use it in your 
 production projects!
 
 Have you ever wandered what happens when you type some https address in 
