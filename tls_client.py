@@ -50,18 +50,6 @@ def bytes_to_num(bytes):
     return num
 
 
-def recv_num_bytes(s, num):
-    ret = ""
-
-    while len(ret) < num:
-        ret += s.recv(min(4096, num - len(ret)))
-
-    assert len(ret) == num
-
-    return ret
-
-
-# NETWORK AND LOW LEVEL SSL PROTOCOL HELPERS
 def num_to_bytes(num, bytes_len=None):
     bytes = []
     assert num >= 0
@@ -76,6 +64,18 @@ def num_to_bytes(num, bytes_len=None):
     else:
         assert len(ans) <= bytes_len
         return "\x00" * (bytes_len - len(ans)) + ans
+
+
+# NETWORK AND LOW LEVEL SSL PROTOCOL HELPERS
+def recv_num_bytes(s, num):
+    ret = ""
+
+    while len(ret) < num:
+        ret += s.recv(min(4096, num - len(ret)))
+
+    assert len(ret) == num
+
+    return ret
 
 
 def recv_tls(s):
