@@ -5,20 +5,20 @@ import hmac
 import socket
 import sys
 
-HOST = "github.com"
+HOST = "adobe.com"
 PORT = 443
 
 TIMEOUT = 10
 
-SSL_VERSION = "\x03\x01"  # tls 1.0, we support only this version for the
+SSL_VERSION = b"\x03\x01"  # tls 1.0, we support only this version for the
                           # simplicity of code
 
-TLS_DHE_RSA_WITH_AES_256_CBC_SHA = "\x00\x39"
+TLS_DHE_RSA_WITH_AES_256_CBC_SHA = b"\x00\x39"
 
-CHANGE_CIPHER = "\x14"
-ALERT = "\x15"
-HANDSHAKE = "\x16"
-APPLICATION_DATA = "\x17"
+CHANGE_CIPHER = b"\x14"
+ALERT = b"\x15"
+HANDSHAKE = b"\x16"
+APPLICATION_DATA = b"\x17"
 
 # OPENSSL CONSTS
 ENC = 1
@@ -42,36 +42,27 @@ def get_mac_len(algo):
 
 
 # BYTE MANIPULATION HELPERS
-def bytes_to_num(bytes):
-    num = 0
-    for byte in bytes:
-        num <<= 8
-        num += ord(byte)
-    return num
+def bytes_to_num(b):
+    return int.from_bytes(b, "big")
 
 
 def num_to_bytes(num, bytes_len=None):
-    bytes = []
     assert num >= 0
-    while num > 0:
-        bytes.append(chr(num % 256))
-        num >>= 8
-
-    ans = ''.join(reversed(bytes))
-
     if bytes_len is None:
-        return ans
-    else:
-        assert len(ans) <= bytes_len
-        return "\x00" * (bytes_len - len(ans)) + ans
+        bytes_len = (num.bit_length() + 7) // 8
+    return int.to_bytes(num, bytes_len, "big")
 
 
 # NETWORK AND LOW LEVEL SSL PROTOCOL HELPERS
 def recv_num_bytes(s, num):
-    ret = ""
+    ret = b""
 
     while len(ret) < num:
-        ret += s.recv(min(4096, num - len(ret)))
+        data = s.recv(min(4096, num - len(ret)))
+        if not data:
+            raise BrokenPipeError
+            break
+        ret += data
 
     assert len(ret) == num
 
@@ -121,7 +112,7 @@ def compute_prf_hash(data, key, hash_len):
     sha_hash = sha_hash[:hash_len]
 
     # now we just need to xor md5_hash and sha_hash
-    xored = bytearray("\x00" * hash_len)
+    xored = bytearray(b"\x00" * hash_len)
     for i in range(hash_len):
         xored[i] = md5_hash[i] ^ (sha_hash[i])
     xored = bytes(xored)
@@ -142,31 +133,31 @@ def calc_mac(mac_key, seq_num, rec_type, data):
 
 def pad_data(data, block_len):
     paddinglen = block_len - (len(data) % block_len)
-    return data + chr(paddinglen - 1) * paddinglen
+    return data + bytes([paddinglen - 1]) * paddinglen
 
 
 def unpad_data(data, block_len):
-    paddinglen = ord(data[-1]) + 1
+    paddinglen = data[-1] + 1
     assert paddinglen <= block_len
     return data[:-paddinglen]
 
 
 # PACKET GENERATORS AND HANDLERS
 def gen_client_hello(client_random):
-    CLIENT_HELLO = "\x01"
+    CLIENT_HELLO = b"\x01"
 
     client_version = SSL_VERSION  # tls 1.0
 
     unix_time = client_random[:4]
     random_bytes = client_random[4:]
 
-    session_id_len = "\x00"
-    session_id = ""
+    session_id_len = b"\x00"
+    session_id = b""
 
     cipher_suites_len = num_to_bytes(2, 2)  # only TLS_DHE_RSA_WITH_AES_256_CBC_SHA
 
-    compression_method_len = "\x01"
-    compression_method = "\x00"  # no compression
+    compression_method_len = b"\x01"
+    compression_method = b"\x00"  # no compression
 
     client_hello_data = (client_version + unix_time + random_bytes +
                          session_id_len + session_id + cipher_suites_len +
@@ -181,7 +172,7 @@ def gen_client_hello(client_random):
 def handle_server_hello(server_hello):
     handshake_type = server_hello[0]
 
-    SERVER_HELLO = "\x02"
+    SERVER_HELLO = 0x2
     assert handshake_type == SERVER_HELLO
 
     server_hello_len = server_hello[1:4]
@@ -203,7 +194,7 @@ def handle_server_hello(server_hello):
 def handle_server_cert(server_cert_data):
     handshake_type = server_cert_data[0]
 
-    CERTIFICATE = "\x0b"
+    CERTIFICATE = 0x0b
     assert handshake_type == CERTIFICATE
 
     certificate_field_len = bytes_to_num(server_cert_data[1:4])
@@ -225,7 +216,7 @@ def handle_server_cert(server_cert_data):
 def handle_server_key_exchange(server_key_exchange_data):
     handshake_type = server_key_exchange_data[0]
 
-    SERVER_KEY_EXCHANGE = "\x0c"
+    SERVER_KEY_EXCHANGE = 0x0c
     assert handshake_type == SERVER_KEY_EXCHANGE
 
     server_key_exchange_data_len = bytes_to_num(server_key_exchange_data[1: 4])
@@ -280,7 +271,7 @@ def validate_signature(rsa, client_random, server_random, dh_p, dh_g, dh_Ys, dh_
 
 
 def gen_client_key_exchange(my_dh_pub):
-    CLIENT_KEY_EXCHANGE = "\x10"
+    CLIENT_KEY_EXCHANGE = b"\x10"
 
     dh_pubkey = num_to_bytes(my_dh_pub)
     dh_params = num_to_bytes(len(dh_pubkey), 2) + dh_pubkey
@@ -292,22 +283,22 @@ def gen_client_key_exchange(my_dh_pub):
 
 def compute_master_secret(client_random, server_random, our_secret):
     SSL_MAX_MASTER_KEY_LENGTH = 48
-    return compute_prf_hash("master secret" + client_random + server_random,
+    return compute_prf_hash(b"master secret" + client_random + server_random,
                             our_secret, SSL_MAX_MASTER_KEY_LENGTH)
 
 
 def compute_key_block(master_secret, key_block_len):
-    return compute_prf_hash("key expansion" + server_random + client_random,
+    return compute_prf_hash(b"key expansion" + server_random + client_random,
                             master_secret, key_block_len)
 
 
 def gen_change_cipher():
-    CHANGE_CIPHER_SPEC_MSG = "\x01"
+    CHANGE_CIPHER_SPEC_MSG = b"\x01"
     return CHANGE_CIPHER_SPEC_MSG
 
 
 def gen_encrypted_hangshake_msg(encryptor, seq_num, mac_key, client_finish_val):
-    FINISHED = "\x14"
+    FINISHED = b"\x14"
 
     msg = FINISHED + num_to_bytes(len(client_finish_val), 3) + client_finish_val
     raw_msg = msg
@@ -321,7 +312,7 @@ def gen_encrypted_hangshake_msg(encryptor, seq_num, mac_key, client_finish_val):
 
 
 def handle_server_change_cipher(server_change_cipher):
-    CHANGE_CIPHER_SPEC_MSG = "\x01"
+    CHANGE_CIPHER_SPEC_MSG = b"\x01"
     assert server_change_cipher == CHANGE_CIPHER_SPEC_MSG
 
 
@@ -345,7 +336,7 @@ def handle_encrypted_hangshake_msg(decryptor, seq_num, mac_key,
 
     handshake_type = payload[0]
 
-    FINISHED = "\x14"
+    FINISHED = 0x14
     assert handshake_type == FINISHED
 
     server_finish_val_len = bytes_to_num(payload[1:4])
@@ -406,8 +397,8 @@ s = socket.create_connection((HOST, PORT), TIMEOUT)
 print("Connected")
 
 print("Handshake: sending a client hello")
-client_random = "\xAB" * 32
-print("Client random: %s" % client_random.encode("hex"))
+client_random = b"\xAB" * 32
+print("Client random: %s" % client_random.hex())
 
 client_hello = gen_client_hello(client_random)
 send_tls(s, HANDSHAKE, client_hello)
@@ -422,8 +413,8 @@ if rec_type == ALERT:
 assert rec_type == HANDSHAKE
 
 server_random, session_id = handle_server_hello(server_hello)
-print("Server random: %s" % server_random.encode("hex"))
-print("Session id: %s" % session_id.encode("hex"))
+print("Server random: %s" % server_random.hex())
+print("Session id: %s" % session_id.hex())
 
 print("Handshake: receiving a server certs")
 rec_type, server_cert_data = recv_tls(s)
@@ -467,7 +458,7 @@ client_key_exchange_data = gen_client_key_exchange(my_pub)
 send_tls(s, HANDSHAKE, client_key_exchange_data)
 
 our_master_secret = compute_master_secret(client_random, server_random, num_to_bytes(our_secret))
-print("Our master secret: %s" % our_master_secret.encode("hex"))
+print("Our master secret: %s" % our_master_secret.hex())
 
 key_block_len = (get_key_len(TLS_DHE_RSA_WITH_AES_256_CBC_SHA) +
                  get_iv_len(TLS_DHE_RSA_WITH_AES_256_CBC_SHA) +
@@ -475,7 +466,7 @@ key_block_len = (get_key_len(TLS_DHE_RSA_WITH_AES_256_CBC_SHA) +
                  ) * 2
 key_block = compute_key_block(our_master_secret, key_block_len)
 
-print("Our keyblock: %s" % key_block.encode("hex"))
+print("Our keyblock: %s" % key_block.hex())
 
 # hack, valid only on TLS_DHE_RSA_WITH_AES_256_CBC_SHA
 
@@ -486,9 +477,9 @@ server_write_key = key_block[72: 104]
 client_write_iv = key_block[104: 120]
 server_write_iv = key_block[120: 136]
 
-print("Mac key: %s, key: %s, iv: %s" % (client_write_mac_key.encode("hex"),
-                                        client_write_key.encode("hex"),
-                                        client_write_iv.encode("hex")))
+print("Mac key: %s, key: %s, iv: %s" % (client_write_mac_key.hex(),
+                                        client_write_key.hex(),
+                                        client_write_iv.hex()))
 
 all_handshake_pkts = (client_hello + server_hello + server_cert_data +
                       server_key_exchange_data + handshake_data +
@@ -497,10 +488,10 @@ all_handshake_pkts = (client_hello + server_hello + server_cert_data +
 all_handshake_pkts_md5 = hashlib.md5(all_handshake_pkts).digest()
 all_handshake_pkts_sha1 = hashlib.sha1(all_handshake_pkts).digest()
 
-client_finish_val = compute_prf_hash("client finished" + all_handshake_pkts_md5 +
+client_finish_val = compute_prf_hash(b"client finished" + all_handshake_pkts_md5 +
                                      all_handshake_pkts_sha1, our_master_secret, 12)
 
-print("Client finish val: %s" % client_finish_val.encode("hex"))
+print("Client finish val: %s" % client_finish_val.hex())
 
 encryptor = EVP.Cipher(alg='aes_256_cbc', key=client_write_key, iv=client_write_iv, op=ENC, padding=0)
 decryptor = EVP.Cipher(alg='aes_256_cbc', key=server_write_key, iv=server_write_iv, op=DEC, padding=0)
@@ -525,10 +516,10 @@ all_handshake_pkts += raw_msg
 all_handshake_pkts_md5 = hashlib.md5(all_handshake_pkts).digest()
 all_handshake_pkts_sha1 = hashlib.sha1(all_handshake_pkts).digest()
 
-server_finish_val = compute_prf_hash("server finished" +
+server_finish_val = compute_prf_hash(b"server finished" +
                                      all_handshake_pkts_md5 + all_handshake_pkts_sha1,
                                      our_master_secret, 12)
-print("Server finish val: %s" % server_finish_val.encode("hex"))
+print("Server finish val: %s" % server_finish_val.hex())
 
 
 print("Handshake: receiving a change cipher msg")
@@ -553,14 +544,21 @@ print("Handshake finished")
 
 # the rest is just for fun
 print("Sending GET /")
-encrypted_msg = gen_encrypted_appdata_msg(encryptor, client_seq_num, client_write_mac_key, "GET /\n")
+request = b"""GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n
+""" % HOST.encode()
+encrypted_msg = gen_encrypted_appdata_msg(encryptor, client_seq_num, client_write_mac_key, request)
 send_tls(s, APPLICATION_DATA, encrypted_msg)
 client_seq_num += 1
 
 print("Receiving an answer")
 
 while True:
-    rec_type, server_encrypted_msg = recv_tls(s)
+    try:
+        rec_type, server_encrypted_msg = recv_tls(s)
+    except BrokenPipeError:
+        print("Connection closed on TCP level")
+        break
+
     if rec_type == APPLICATION_DATA:
         mac_is_valid, msg = handle_encrypted_appdata_msg(decryptor, server_seq_num,
                                                          server_write_mac_key,
