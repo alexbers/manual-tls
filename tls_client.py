@@ -5,12 +5,12 @@ import hmac
 import socket
 import sys
 
-HOST = "bash.org.ru"
+HOST = "wiki.python.org"
 PORT = 443
 
 TIMEOUT = 10
 
-TLS_VERSION = b"\x03\x02"  # tls 1.1, we support only this version for the
+TLS_VERSION = b"\x03\x03"  # tls 1.2, we support only this version for the
                            # simplicity of code
 
 TLS_DHE_RSA_WITH_AES_256_CBC_SHA = b"\x00\x39"
@@ -23,6 +23,9 @@ APPLICATION_DATA = b"\x17"
 # OPENSSL CONSTS
 ENC = 1
 DEC = 0
+
+SHA1_ALG = 2
+RSA_ALG = 1
 
 CLIENT_IV = b"\x01\x02\x03\x04\x03\x02\x01\x00" * 2
 SERVER_IV = b"\x10\x11\x12\x13\x14\x15\x16\x17" * 2
@@ -97,36 +100,16 @@ def send_tls(s, rec_type, msg):
 
 # MESSAGE AUTENTICATION CODES AND HASHING HELPERS
 def compute_prf_hash(data, key, hash_len):
-    "Computes a very strange hash"
+    sha256_result = bytearray()
 
-    part1 = key[:len(key) // 2]
-    part2 = key[len(key) // 2:]
+    hmac_digest = hmac.new(key, data, hashlib.sha256).digest()
 
-    md5_hash = bytearray()
+    while len(sha256_result) < hash_len:
+        sha256_result += hmac.new(key, hmac_digest + data, hashlib.sha256).digest()
+        hmac_digest = hmac.new(key, hmac_digest, hashlib.sha256).digest()
+    sha256_result = sha256_result[:hash_len]
 
-    hash1 = hmac.new(part1, data, hashlib.md5).digest()
-
-    while len(md5_hash) < hash_len:
-        md5_hash += hmac.new(part1, hash1 + data, hashlib.md5).digest()
-        hash1 = hmac.new(part1, hash1, hashlib.md5).digest()
-    md5_hash = md5_hash[:hash_len]
-
-    sha_hash = bytearray()
-
-    hash2 = hmac.new(part2, data, hashlib.sha1).digest()
-
-    while len(sha_hash) < hash_len:
-        sha_hash += hmac.new(part2, hash2 + data, hashlib.sha1).digest()
-        hash2 = hmac.new(part2, hash2, hashlib.sha1).digest()
-    sha_hash = sha_hash[:hash_len]
-
-    # now we just need to xor md5_hash and sha_hash
-    xored = bytearray(b"\x00" * hash_len)
-    for i in range(hash_len):
-        xored[i] = md5_hash[i] ^ (sha_hash[i])
-    xored = bytes(xored)
-
-    return xored
+    return bytes(sha256_result)
 
 
 def calc_mac(mac_key, seq_num, rec_type, data):
@@ -246,6 +229,14 @@ def handle_server_key_exchange(server_key_exchange_data):
     dh_Ys = bytes_to_num(server_key_exchange_data[cur_pos: cur_pos + dh_Ys_len])
 
     cur_pos += dh_Ys_len
+    dh_hash_alg = bytes_to_num(server_key_exchange_data[cur_pos: cur_pos + 1])
+    assert dh_hash_alg == SHA1_ALG
+
+    cur_pos += 1
+    dh_sign_alg = bytes_to_num(server_key_exchange_data[cur_pos: cur_pos + 1])
+    assert dh_sign_alg == RSA_ALG
+
+    cur_pos += 1
     dh_sign_len = bytes_to_num(server_key_exchange_data[cur_pos: cur_pos + 2])
 
     cur_pos += 2
@@ -264,16 +255,12 @@ def validate_signature(rsa, client_random, server_random, dh_p, dh_g, dh_Ys, dh_
     text += num_to_bytes(len(dh_g_raw), 2) + dh_g_raw
     text += num_to_bytes(len(dh_Ys_raw), 2) + dh_Ys_raw
 
-    md5_hash = hashlib.md5(text).digest()
     sha_hash = hashlib.sha1(text).digest()
 
-    encrypted_premaster = rsa.public_encrypt(md5_hash + sha_hash, RSA.pkcs1_oaep_padding)
+    encrypted_premaster = rsa.public_encrypt(sha_hash, RSA.pkcs1_oaep_padding)
 
-    # Dirty hack: M2Crypto have no md5+sha1 support. But openssl has it since 2002
-    # I filed a feature request to M2Crypto, but now we add explicitly md5_sha1 const in m2crypto
-    m2.NID_md5_sha1 = 114
     try:
-        rsa.verify(md5_hash + sha_hash, num_to_bytes(dh_sign), algo="md5_sha1")
+        rsa.verify(sha_hash, num_to_bytes(dh_sign), algo="sha1")
         return True
     except RSA.RSAError:
         return False
@@ -465,14 +452,14 @@ my_pub = pow(dh_g, my_secretY, dh_p)
 print("My DH pubkey: %s" % my_pub)
 
 our_secret = pow(dh_Ys, my_secretY, dh_p)
-print("Our common DH secret is: %s" % our_secret)
+print("Our common DH secret (premaster secret) is: %x" % our_secret)
 
 print("Handshake: sending a client key exchange")
 client_key_exchange_data = gen_client_key_exchange(my_pub)
 send_tls(s, HANDSHAKE, client_key_exchange_data)
 
 our_master_secret = compute_master_secret(client_random, server_random, num_to_bytes(our_secret))
-print("Our master secret: %s" % our_master_secret.hex())
+print("Our master key: %s" % our_master_secret.hex())
 
 key_block_len = (get_key_len(TLS_DHE_RSA_WITH_AES_256_CBC_SHA) +
                  get_iv_len(TLS_DHE_RSA_WITH_AES_256_CBC_SHA) +
@@ -496,11 +483,10 @@ all_handshake_pkts = (client_hello + server_hello + server_cert_data +
                       server_key_exchange_data + handshake_data +
                       client_key_exchange_data)
 
-all_handshake_pkts_md5 = hashlib.md5(all_handshake_pkts).digest()
-all_handshake_pkts_sha1 = hashlib.sha1(all_handshake_pkts).digest()
+all_handshake_pkts_sha256 = hashlib.sha256(all_handshake_pkts).digest()
 
-client_finish_val = compute_prf_hash(b"client finished" + all_handshake_pkts_md5 +
-                                     all_handshake_pkts_sha1, our_master_secret, 12)
+client_finish_val = compute_prf_hash(b"client finished" +
+                                     all_handshake_pkts_sha256, our_master_secret, 12)
 
 print("Client finish val: %s" % client_finish_val.hex())
 
@@ -524,11 +510,10 @@ send_tls(s, HANDSHAKE, encrypted_hangshake_msg)
 client_seq_num += 1
 
 all_handshake_pkts += raw_msg
-all_handshake_pkts_md5 = hashlib.md5(all_handshake_pkts).digest()
-all_handshake_pkts_sha1 = hashlib.sha1(all_handshake_pkts).digest()
+all_handshake_pkts_sha256 = hashlib.sha256(all_handshake_pkts).digest()
 
 server_finish_val = compute_prf_hash(b"server finished" +
-                                     all_handshake_pkts_md5 + all_handshake_pkts_sha1,
+                                     all_handshake_pkts_sha256,
                                      our_master_secret, 12)
 print("Server finish val: %s" % server_finish_val.hex())
 
@@ -555,7 +540,7 @@ print("Handshake finished")
 
 # the rest is just for fun
 print("Sending GET /")
-request = b"""GET / HTTP/1.1\r\nHost: bash.im\r\nConnection: close\r\n\r\n
+request = b"""GET / HTTP/1.1\r\nHost: nohost\r\nConnection: close\r\n\r\n
 """
 encrypted_msg = gen_encrypted_appdata_msg(encryptor, client_seq_num, client_write_mac_key, request)
 send_tls(s, APPLICATION_DATA, encrypted_msg)
