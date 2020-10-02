@@ -13,7 +13,7 @@ TIMEOUT = 10
 # tls 1.2 for legacy reasons, tls 1.3 will be send in extensions as required
 LEGACY_TLS_VERSION = b"\x03\x03"
 
-TLS_DHE_RSA_WITH_AES_128_CBC_SHA = b"\x00\x33"
+TLS_DHE_RSA_WITH_AES_128_CBC_SHA256 = b"\x00\x67"
 
 CHANGE_CIPHER = b"\x14"
 ALERT = b"\x15"
@@ -32,17 +32,17 @@ SERVER_IV = b"\x10\x11\x12\x13\x14\x15\x16\x17" * 2
 
 # CYPHER INFO HELPERS
 def get_key_len(algo):
-    keylens = {TLS_DHE_RSA_WITH_AES_128_CBC_SHA: 16}
+    keylens = {TLS_DHE_RSA_WITH_AES_128_CBC_SHA256: 16}
     return keylens[algo]
 
 
 def get_iv_len(algo):
-    ivlens = {TLS_DHE_RSA_WITH_AES_128_CBC_SHA: 16}
+    ivlens = {TLS_DHE_RSA_WITH_AES_128_CBC_SHA256: 16}
     return ivlens[algo]
 
 
 def get_mac_len(algo):
-    maclens = {TLS_DHE_RSA_WITH_AES_128_CBC_SHA: 20}
+    maclens = {TLS_DHE_RSA_WITH_AES_128_CBC_SHA256: 32}
     return maclens[algo]
 
 
@@ -112,7 +112,7 @@ def calc_mac(mac_key, seq_num, rec_type, data):
     # print("header %s" % header.encode("hex"))
     # print("data %s" % data.encode("hex"))
 
-    mac = hmac.new(mac_key, header + data, hashlib.sha1).digest()
+    mac = hmac.new(mac_key, header + data, hashlib.sha256).digest()
     return mac
 
 
@@ -139,7 +139,7 @@ def gen_client_hello(client_random):
     session_id_len = b"\x00"
     session_id = b""
 
-    cipher_suites_len = num_to_bytes(2, 2)  # only TLS_DHE_RSA_WITH_AES_128_CBC_SHA
+    cipher_suites_len = num_to_bytes(2, 2)  # only TLS_DHE_RSA_WITH_AES_128_CBC_SHA256
 
     compression_method_len = b"\x01"
     compression_method = b"\x00"  # no compression
@@ -155,7 +155,7 @@ def gen_client_hello(client_random):
 
     client_hello_data = (client_version + unix_time + random_bytes +
                          session_id_len + session_id + cipher_suites_len +
-                         TLS_DHE_RSA_WITH_AES_128_CBC_SHA +
+                         TLS_DHE_RSA_WITH_AES_128_CBC_SHA256 +
                          compression_method_len + compression_method)
 
     client_hello_tlv = CLIENT_HELLO + num_to_bytes(len(client_hello_data), 3) + client_hello_data
@@ -322,7 +322,7 @@ def handle_encrypted_hangshake_msg(decryptor, seq_num, mac_key,
     msg = unpad_data(msg, 16)
     print(msg)
 
-    mac_len = get_mac_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA)
+    mac_len = get_mac_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA256)
 
     payload = msg[:-mac_len]
     mac = msg[-mac_len:]
@@ -363,7 +363,7 @@ def handle_encrypted_appdata_msg(decryptor, seq_num, mac_key, encrypted_msg):
     msg = msg[len(SERVER_IV):]
     msg = unpad_data(msg, 16)
 
-    mac_len = get_mac_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA)
+    mac_len = get_mac_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA256)
 
     payload = msg[:-mac_len]
     mac = msg[-mac_len:]
@@ -381,7 +381,7 @@ def handle_encrypted_alert(decryptor, seq_num, mac_key, encrypted_msg):
     msg = msg[len(SERVER_IV):]
     msg = unpad_data(msg, 16)
 
-    mac_len = get_mac_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA)
+    mac_len = get_mac_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA256)
 
     payload = msg[:-mac_len]
     mac = msg[-mac_len:]
@@ -410,7 +410,7 @@ print("Handshake: receiving a server hello")
 rec_type, server_hello = recv_tls(s)
 
 if rec_type == ALERT:
-    print("Server sent us ALERT, it probably doesn't support TLS_DHE_RSA_WITH_AES_128_CBC_SHA algo")
+    print("Server sent us ALERT, it probably doesn't support TLS_DHE_RSA_WITH_AES_128_CBC_SHA256 algo")
     sys.exit(1)
 
 assert rec_type == HANDSHAKE
@@ -463,20 +463,20 @@ send_tls(s, HANDSHAKE, client_key_exchange_data)
 our_master_secret = compute_master_secret(client_random, server_random, num_to_bytes(our_secret))
 print("Our master key: %s" % our_master_secret.hex())
 
-key_block_len = (get_key_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA) +
-                 get_iv_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA) +
-                 get_mac_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA)
+key_block_len = (get_key_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA256) +
+                 get_iv_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA256) +
+                 get_mac_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA256)
                  ) * 2
 key_block = compute_key_block(our_master_secret, key_block_len)
 
 print("Our keyblock: %s" % key_block.hex())
 
-# hack, valid only on TLS_DHE_RSA_WITH_AES_128_CBC_SHA
+# hack, valid only on TLS_DHE_RSA_WITH_AES_128_CBC_SHA256
 
-client_write_mac_key = key_block[:20]
-server_write_mac_key = key_block[20:40]
-client_write_key = key_block[40: 56]
-server_write_key = key_block[56: 72]
+client_write_mac_key = key_block[:32]
+server_write_mac_key = key_block[32:64]
+client_write_key = key_block[64:80]
+server_write_key = key_block[80:96]
 
 print("Mac key: %s, key: %s" % (client_write_mac_key.hex(),
                                 client_write_key.hex()))
