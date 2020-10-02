@@ -1,4 +1,7 @@
-from M2Crypto import RSA, X509, EVP, m2
+from Crypto.Cipher import AES
+from Crypto.PublicKey import RSA
+from Crypto.Signature import pkcs1_15
+from Crypto.Hash import SHA1
 
 import hashlib
 import hmac
@@ -257,12 +260,9 @@ def validate_signature(rsa, client_random, server_random, dh_p, dh_g, dh_Ys, dh_
     text += num_to_bytes(len(dh_g_raw), 2) + dh_g_raw
     text += num_to_bytes(len(dh_Ys_raw), 2) + dh_Ys_raw
 
-    sha_hash = hashlib.sha1(text).digest()
-
-    encrypted_premaster = rsa.public_encrypt(sha_hash, RSA.pkcs1_oaep_padding)
-
     try:
-        rsa.verify(sha_hash, num_to_bytes(dh_sign), algo="sha1")
+        sha_hash = SHA1.new(text)
+        pkcs1_15.new(rsa).verify(sha_hash, num_to_bytes(dh_sign))
         return True
     except RSA.RSAError:
         return False
@@ -303,8 +303,7 @@ def gen_encrypted_hangshake_msg(encryptor, seq_num, mac_key, client_finish_val):
 
     msg += calc_mac(mac_key, seq_num, HANDSHAKE, msg)
 
-    encrypted_msg = CLIENT_IV + encryptor.update(pad_data(msg, 16))  # for aes
-    encrypted_msg += encryptor.final()
+    encrypted_msg = CLIENT_IV + encryptor.encrypt(pad_data(msg, 16))  # for aes
 
     return raw_msg, encrypted_msg
 
@@ -316,9 +315,8 @@ def handle_server_change_cipher(server_change_cipher):
 
 def handle_encrypted_hangshake_msg(decryptor, seq_num, mac_key,
                                    computed_server_finish_val, encrypted_msg):
-    msg = decryptor.update(encrypted_msg)
+    msg = decryptor.decrypt(encrypted_msg)
     msg = msg[len(SERVER_IV):]
-    msg += decryptor.final()
     msg = unpad_data(msg, 16)
     print(msg)
 
@@ -351,15 +349,13 @@ def handle_encrypted_hangshake_msg(decryptor, seq_num, mac_key,
 def gen_encrypted_appdata_msg(encryptor, seq_num, mac_key, msg):
     msg += calc_mac(mac_key, seq_num, APPLICATION_DATA, msg)
 
-    encrypted_msg =  encryptor.update(pad_data(CLIENT_IV + msg, 16))  # for aes
-    encrypted_msg += encryptor.final()
+    encrypted_msg = encryptor.encrypt(pad_data(CLIENT_IV + msg, 16))  # for aes
 
     return encrypted_msg
 
 
 def handle_encrypted_appdata_msg(decryptor, seq_num, mac_key, encrypted_msg):
-    msg = decryptor.update(encrypted_msg)
-    msg += decryptor.final()
+    msg = decryptor.decrypt(encrypted_msg)
     msg = msg[len(SERVER_IV):]
     msg = unpad_data(msg, 16)
 
@@ -376,8 +372,7 @@ def handle_encrypted_appdata_msg(decryptor, seq_num, mac_key, encrypted_msg):
 
 
 def handle_encrypted_alert(decryptor, seq_num, mac_key, encrypted_msg):
-    msg = decryptor.update(encrypted_msg)
-    msg += decryptor.final()
+    msg = decryptor.decrypt(encrypted_msg)
     msg = msg[len(SERVER_IV):]
     msg = unpad_data(msg, 16)
 
@@ -426,7 +421,8 @@ assert rec_type == HANDSHAKE
 certs = handle_server_cert(server_cert_data)
 print("Got %d certs" % len(certs))
 
-rsa = X509.load_cert_string(certs[0], format=X509.FORMAT_DER).get_pubkey().get_rsa()
+# rsa = X509.load_cert_string(certs[0], format=X509.FORMAT_DER).get_pubkey().get_rsa()
+rsa = RSA.import_key(certs[0])
 
 print("Handshake: receiving a server key exchange")
 rec_type, server_key_exchange_data = recv_tls(s)
@@ -492,8 +488,8 @@ client_finish_val = compute_prf_hash(b"client finished" +
 
 print("Client finish val: %s" % client_finish_val.hex())
 
-encryptor = EVP.Cipher(alg='aes_128_cbc', key=client_write_key, iv=CLIENT_IV, op=ENC, padding=0)
-decryptor = EVP.Cipher(alg='aes_128_cbc', key=server_write_key, iv=SERVER_IV, op=DEC, padding=0)
+encryptor = AES.new(client_write_key, AES.MODE_CBC, iv=CLIENT_IV) #, iv=CLIENT_IV, op=ENC, padding=0)
+decryptor = AES.new(server_write_key, AES.MODE_CBC, iv=SERVER_IV) #, op=DEC, padding=0)
 
 client_seq_num = 0  # for use in mac calculation
 server_seq_num = 0
