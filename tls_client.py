@@ -3,6 +3,8 @@ from Crypto.PublicKey import RSA
 from Crypto.Signature import pkcs1_15
 from Crypto.Hash import SHA1
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 import hashlib
 import hmac
 import socket
@@ -16,37 +18,28 @@ TIMEOUT = 10
 # tls 1.2 for legacy reasons, tls 1.3 will be send in extensions as required
 LEGACY_TLS_VERSION = b"\x03\x03"
 
-TLS_DHE_RSA_WITH_AES_128_CBC_SHA256 = b"\x00\x67"
+TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 = b"\x00\x9e"
 
 CHANGE_CIPHER = b"\x14"
 ALERT = b"\x15"
 HANDSHAKE = b"\x16"
 APPLICATION_DATA = b"\x17"
 
-# OPENSSL CONSTS
-ENC = 1
-DEC = 0
-
 SHA1_ALG = 2
 RSA_ALG = 1
 
-CLIENT_IV = b"\x01\x02\x03\x04\x03\x02\x01\x00" * 2
-SERVER_IV = b"\x10\x11\x12\x13\x14\x15\x16\x17" * 2
+TAG_LEN = 16
+
 
 # CYPHER INFO HELPERS
 def get_key_len(algo):
-    keylens = {TLS_DHE_RSA_WITH_AES_128_CBC_SHA256: 16}
+    keylens = {TLS_DHE_RSA_WITH_AES_128_GCM_SHA256: 16}
     return keylens[algo]
 
 
 def get_iv_len(algo):
-    ivlens = {TLS_DHE_RSA_WITH_AES_128_CBC_SHA256: 16}
+    ivlens = {TLS_DHE_RSA_WITH_AES_128_GCM_SHA256: 4}
     return ivlens[algo]
-
-
-def get_mac_len(algo):
-    maclens = {TLS_DHE_RSA_WITH_AES_128_CBC_SHA256: 32}
-    return maclens[algo]
 
 
 # BYTE MANIPULATION HELPERS
@@ -108,28 +101,6 @@ def compute_prf_hash(data, key, hash_len):
     return bytes(sha256_result)
 
 
-def calc_mac(mac_key, seq_num, rec_type, data):
-    header = num_to_bytes(seq_num, 8) + rec_type + LEGACY_TLS_VERSION + num_to_bytes(len(data), 2)
-
-    # print("mac_key %s" % mac_key.encode("hex"))
-    # print("header %s" % header.encode("hex"))
-    # print("data %s" % data.encode("hex"))
-
-    mac = hmac.new(mac_key, header + data, hashlib.sha256).digest()
-    return mac
-
-
-def pad_data(data, block_len):
-    paddinglen = block_len - (len(data) % block_len)
-    return data + bytes([paddinglen - 1]) * paddinglen
-
-
-def unpad_data(data, block_len):
-    paddinglen = data[-1] + 1
-    assert paddinglen <= block_len
-    return data[:-paddinglen]
-
-
 # PACKET GENERATORS AND HANDLERS
 def gen_client_hello(client_random):
     CLIENT_HELLO = b"\x01"
@@ -142,7 +113,7 @@ def gen_client_hello(client_random):
     session_id_len = b"\x00"
     session_id = b""
 
-    cipher_suites_len = num_to_bytes(2, 2)  # only TLS_DHE_RSA_WITH_AES_128_CBC_SHA256
+    cipher_suites_len = num_to_bytes(2, 2)  # only TLS_DHE_RSA_WITH_AES_128_GCM_SHA256
 
     compression_method_len = b"\x01"
     compression_method = b"\x00"  # no compression
@@ -158,7 +129,7 @@ def gen_client_hello(client_random):
 
     client_hello_data = (client_version + unix_time + random_bytes +
                          session_id_len + session_id + cipher_suites_len +
-                         TLS_DHE_RSA_WITH_AES_128_CBC_SHA256 +
+                         TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 +
                          compression_method_len + compression_method)
 
     client_hello_tlv = CLIENT_HELLO + num_to_bytes(len(client_hello_data), 3) + client_hello_data
@@ -264,7 +235,7 @@ def validate_signature(rsa, client_random, server_random, dh_p, dh_g, dh_Ys, dh_
         sha_hash = SHA1.new(text)
         pkcs1_15.new(rsa).verify(sha_hash, num_to_bytes(dh_sign))
         return True
-    except RSA.RSAError:
+    except ValueError:
         return False
 
 
@@ -295,17 +266,33 @@ def gen_change_cipher():
     return CHANGE_CIPHER_SPEC_MSG
 
 
-def gen_encrypted_hangshake_msg(encryptor, seq_num, mac_key, client_finish_val):
+def do_authenticated_encryption(key, nonce_start, seq_num, msg_type, msg):
+    # totaly not secure, it should be random
+    nonce_end = b"\x00" * 8
+    nonce = nonce_start + nonce_end
+
+    data = num_to_bytes(seq_num, 8) + msg_type + LEGACY_TLS_VERSION + num_to_bytes(len(msg), 2)
+    encrypted_msg = AESGCM(key).encrypt(nonce, msg, associated_data=data)
+    return nonce_end + encrypted_msg
+
+
+def do_authenticated_decryption(key, nonce_start, seq_num, msg_type, payload):
+    nonce_end, msg, tag = payload[:8], payload[8:-TAG_LEN], payload[-TAG_LEN:]
+    nonce = nonce_start + nonce_end
+
+    data = num_to_bytes(seq_num, 8) + msg_type + LEGACY_TLS_VERSION + num_to_bytes(len(msg), 2)
+    msg = AESGCM(key).decrypt(nonce, msg + tag, associated_data=data)
+    return msg
+
+
+def gen_encrypted_hangshake_msg(client_write_key, client_write_nonce_start, seq_num,
+                                client_finish_val):
     FINISHED = b"\x14"
 
     msg = FINISHED + num_to_bytes(len(client_finish_val), 3) + client_finish_val
-    raw_msg = msg
-
-    msg += calc_mac(mac_key, seq_num, HANDSHAKE, msg)
-
-    encrypted_msg = CLIENT_IV + encryptor.encrypt(pad_data(msg, 16))  # for aes
-
-    return raw_msg, encrypted_msg
+    encrypted_msg = do_authenticated_encryption(client_write_key, client_write_nonce_start,
+                                                seq_num, HANDSHAKE, msg)
+    return msg, encrypted_msg
 
 
 def handle_server_change_cipher(server_change_cipher):
@@ -313,25 +300,12 @@ def handle_server_change_cipher(server_change_cipher):
     assert server_change_cipher == CHANGE_CIPHER_SPEC_MSG
 
 
-def handle_encrypted_hangshake_msg(decryptor, seq_num, mac_key,
-                                   computed_server_finish_val, encrypted_msg):
-    msg = decryptor.decrypt(encrypted_msg)
-    msg = msg[len(SERVER_IV):]
-    msg = unpad_data(msg, 16)
-    print(msg)
-
-    mac_len = get_mac_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA256)
-
-    payload = msg[:-mac_len]
-    mac = msg[-mac_len:]
-
+def handle_encrypted_hangshake_msg(server_write_key, server_write_nonce_start, seq_num,
+                                   encrypted_msg, computed_server_finish_val):
     # we use HANDSHAKE as record type because this function will be called if
     # the record type is HANDSHAKE
-
-    computed_mac = calc_mac(mac_key, seq_num, HANDSHAKE, payload)
-
-    mac_is_valid = mac == computed_mac
-    print("Mac_is_valid", mac_is_valid)
+    payload = do_authenticated_decryption(server_write_key, server_write_nonce_start,
+                                          seq_num, HANDSHAKE, encrypted_msg)
 
     handshake_type = payload[0]
 
@@ -342,52 +316,29 @@ def handle_encrypted_hangshake_msg(decryptor, seq_num, mac_key,
     server_finish_val = payload[4:]
     assert len(server_finish_val) == server_finish_val_len
 
-    server_finish_val_is_valid = computed_server_finish_val == server_finish_val
-    return mac_is_valid, server_finish_val_is_valid
+    server_finish_val_is_valid = (computed_server_finish_val == server_finish_val)
+    return server_finish_val_is_valid
 
 
-def gen_encrypted_appdata_msg(encryptor, seq_num, mac_key, msg):
-    msg += calc_mac(mac_key, seq_num, APPLICATION_DATA, msg)
-
-    encrypted_msg = encryptor.encrypt(pad_data(CLIENT_IV + msg, 16))  # for aes
-
+def gen_encrypted_appdata_msg(client_write_key, client_write_nonce_start, seq_num, msg):
+    encrypted_msg = do_authenticated_encryption(client_write_key, client_write_nonce_start,
+                                                seq_num, APPLICATION_DATA, msg)
     return encrypted_msg
 
 
-def handle_encrypted_appdata_msg(decryptor, seq_num, mac_key, encrypted_msg):
-    msg = decryptor.decrypt(encrypted_msg)
-    msg = msg[len(SERVER_IV):]
-    msg = unpad_data(msg, 16)
-
-    mac_len = get_mac_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA256)
-
-    payload = msg[:-mac_len]
-    mac = msg[-mac_len:]
-
-    computed_mac = calc_mac(mac_key, seq_num, APPLICATION_DATA, payload)
-
-    mac_is_valid = mac == computed_mac
-
-    return mac_is_valid, payload
+def handle_encrypted_appdata_msg(server_write_key, server_write_nonce_start, seq_num,
+                                 encrypted_msg):
+    payload = do_authenticated_decryption(server_write_key, server_write_nonce_start,
+                                          seq_num, APPLICATION_DATA, encrypted_msg)
+    return payload
 
 
-def handle_encrypted_alert(decryptor, seq_num, mac_key, encrypted_msg):
-    msg = decryptor.decrypt(encrypted_msg)
-    msg = msg[len(SERVER_IV):]
-    msg = unpad_data(msg, 16)
-
-    mac_len = get_mac_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA256)
-
-    payload = msg[:-mac_len]
-    mac = msg[-mac_len:]
+def handle_encrypted_alert(server_write_key, server_write_nonce_start, seq_num, encrypted_msg):
+    payload = do_authenticated_decryption(server_write_key, server_write_nonce_start,
+                                          seq_num, ALERT, encrypted_msg)
 
     alert_level, alert_description = payload
-
-    computed_mac = calc_mac(mac_key, seq_num, ALERT, payload)
-
-    mac_is_valid = mac == computed_mac
-
-    return mac_is_valid, alert_level, alert_description
+    return alert_level, alert_description
 
 
 print("Connecting to %s:%d" % (HOST, PORT))
@@ -405,7 +356,8 @@ print("Handshake: receiving a server hello")
 rec_type, server_hello = recv_tls(s)
 
 if rec_type == ALERT:
-    print("Server sent us ALERT, it probably doesn't support TLS_DHE_RSA_WITH_AES_128_CBC_SHA256 algo")
+    print("Server sent us ALERT, it probably doesn't support " +
+          "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 algo")
     sys.exit(1)
 
 assert rec_type == HANDSHAKE
@@ -414,14 +366,13 @@ server_random, session_id = handle_server_hello(server_hello)
 print("Server random: %s" % server_random.hex())
 print("Session id: %s" % session_id.hex())
 
-print("Handshake: receiving a server certs")
+print("Handshake: receiving server certs")
 rec_type, server_cert_data = recv_tls(s)
 assert rec_type == HANDSHAKE
 
 certs = handle_server_cert(server_cert_data)
 print("Got %d certs" % len(certs))
 
-# rsa = X509.load_cert_string(certs[0], format=X509.FORMAT_DER).get_pubkey().get_rsa()
 rsa = RSA.import_key(certs[0])
 
 print("Handshake: receiving a server key exchange")
@@ -429,10 +380,10 @@ rec_type, server_key_exchange_data = recv_tls(s)
 assert rec_type == HANDSHAKE
 
 dh_p, dh_g, dh_Ys, dh_sign = handle_server_key_exchange(server_key_exchange_data)
-print("DH prime: %s" % dh_p)
-print("DH generator: %s" % dh_g)
-print("DH pubkey: %s" % dh_Ys)
-print("DH signature: %s" % dh_sign)
+print("DH prime: %x" % dh_p)
+print("DH generator: %x" % dh_g)
+print("DH pubkey: %x" % dh_Ys)
+print("DH signature: %x" % dh_sign)
 
 sign_is_valid = validate_signature(rsa, client_random, server_random, dh_p, dh_g, dh_Ys, dh_sign)
 if sign_is_valid:
@@ -447,7 +398,7 @@ assert rec_type == HANDSHAKE
 my_secretY = 10
 
 my_pub = pow(dh_g, my_secretY, dh_p)
-print("My DH pubkey: %s" % my_pub)
+print("My DH pubkey: %x" % my_pub)
 
 our_secret = pow(dh_Ys, my_secretY, dh_p)
 print("Our common DH secret (premaster secret) is: %x" % our_secret)
@@ -459,23 +410,21 @@ send_tls(s, HANDSHAKE, client_key_exchange_data)
 our_master_secret = compute_master_secret(client_random, server_random, num_to_bytes(our_secret))
 print("Our master key: %s" % our_master_secret.hex())
 
-key_block_len = (get_key_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA256) +
-                 get_iv_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA256) +
-                 get_mac_len(TLS_DHE_RSA_WITH_AES_128_CBC_SHA256)
+key_block_len = (get_key_len(TLS_DHE_RSA_WITH_AES_128_GCM_SHA256) +
+                 get_iv_len(TLS_DHE_RSA_WITH_AES_128_GCM_SHA256)
                  ) * 2
 key_block = compute_key_block(our_master_secret, key_block_len)
 
 print("Our keyblock: %s" % key_block.hex())
 
-# hack, valid only on TLS_DHE_RSA_WITH_AES_128_CBC_SHA256
+# hack, valid only on TLS_DHE_RSA_WITH_AES_128_GCM_SHA256
+client_write_key = key_block[0:16]
+server_write_key = key_block[16:32]
+client_write_nonce_start = key_block[32:36]
+server_write_nonce_start = key_block[36:40]
 
-client_write_mac_key = key_block[:32]
-server_write_mac_key = key_block[32:64]
-client_write_key = key_block[64:80]
-server_write_key = key_block[80:96]
-
-print("Mac key: %s, key: %s" % (client_write_mac_key.hex(),
-                                client_write_key.hex()))
+print("Client key: %s nonce_start: %s" % (client_write_key.hex(), client_write_nonce_start.hex()))
+print("Server key: %s nonce_start: %s" % (server_write_key.hex(), server_write_nonce_start.hex()))
 
 all_handshake_pkts = (client_hello + server_hello + server_cert_data +
                       server_key_exchange_data + handshake_data +
@@ -488,22 +437,19 @@ client_finish_val = compute_prf_hash(b"client finished" +
 
 print("Client finish val: %s" % client_finish_val.hex())
 
-encryptor = AES.new(client_write_key, AES.MODE_CBC, iv=CLIENT_IV) #, iv=CLIENT_IV, op=ENC, padding=0)
-decryptor = AES.new(server_write_key, AES.MODE_CBC, iv=SERVER_IV) #, op=DEC, padding=0)
-
-client_seq_num = 0  # for use in mac calculation
+client_seq_num = 0  # for use in authenticated encryption
 server_seq_num = 0
 
 print("Handshake: sending a change cipher msg")
 change_cipher = gen_change_cipher()
 send_tls(s, CHANGE_CIPHER, change_cipher)
 
-# All client messages beyond this point are crypted
+# All client messages beyond this point are encrypted
 
 print("Handshake: sending an encrypted handshake msg")
-raw_msg, encrypted_hangshake_msg = gen_encrypted_hangshake_msg(encryptor, client_seq_num,
-                                                               client_write_mac_key,
-                                                               client_finish_val)
+raw_msg, encrypted_hangshake_msg = gen_encrypted_hangshake_msg(client_write_key,
+                                                               client_write_nonce_start,
+                                                               client_seq_num, client_finish_val)
 send_tls(s, HANDSHAKE, encrypted_hangshake_msg)
 client_seq_num += 1
 
@@ -515,7 +461,6 @@ server_finish_val = compute_prf_hash(b"server finished" +
                                      our_master_secret, 12)
 print("Server finish val: %s" % server_finish_val.hex())
 
-
 print("Handshake: receiving a change cipher msg")
 rec_type, server_change_cipher = recv_tls(s)
 assert rec_type == CHANGE_CIPHER
@@ -525,22 +470,22 @@ handle_server_change_cipher(server_change_cipher)
 print("Handshake: receiving an encrypted handshake msg")
 rec_type, server_encrypted_hangshake_msg = recv_tls(s)
 
-mac_is_valid, server_finish_val_is_valid = (
+server_finish_val_is_valid = (
     handle_encrypted_hangshake_msg(
-        decryptor, server_seq_num, server_write_mac_key,
-        server_finish_val, server_encrypted_hangshake_msg)
+        server_write_key, server_write_nonce_start, server_seq_num,
+        server_encrypted_hangshake_msg, server_finish_val)
 )
 server_seq_num += 1
 
-print("Msg mac is valid: %s, server finish val is valid: %s" % (
-      mac_is_valid, server_finish_val_is_valid))
+print("Server finish val is valid: %s" % (server_finish_val_is_valid))
 print("Handshake finished")
 
 # the rest is just for fun
 print("Sending GET /")
-request = b"""GET / HTTP/1.1\r\nHost: nohost\r\nConnection: close\r\n\r\n
-"""
-encrypted_msg = gen_encrypted_appdata_msg(encryptor, client_seq_num, client_write_mac_key, request)
+request = b"""GET / HTTP/1.1\r\nHost: nohost\r\nConnection: close\r\n\r\n"""
+
+encrypted_msg = gen_encrypted_appdata_msg(client_write_key, client_write_nonce_start,
+                                          client_seq_num, request)
 send_tls(s, APPLICATION_DATA, encrypted_msg)
 client_seq_num += 1
 
@@ -554,21 +499,16 @@ while True:
         break
 
     if rec_type == APPLICATION_DATA:
-        mac_is_valid, msg = handle_encrypted_appdata_msg(decryptor, server_seq_num,
-                                                         server_write_mac_key,
-                                                         server_encrypted_msg)
+        msg = handle_encrypted_appdata_msg(server_write_key, server_write_nonce_start,
+                                           server_seq_num, server_encrypted_msg)
         server_seq_num += 1
-        if not mac_is_valid:
-            print("Mac is invalid!!!")
         print("Got: %s" % msg)
     elif rec_type == ALERT:
-        mac_is_valid, alert_level, alert_description = handle_encrypted_alert(decryptor,
-                                                                              server_seq_num,
-                                                                              server_write_mac_key,
-                                                                              server_encrypted_msg)
+        alert_level, alert_description = (
+            handle_encrypted_alert(server_write_key, server_write_nonce_start,
+                                   server_seq_num, server_encrypted_msg)
+        )
         server_seq_num += 1
-        if not mac_is_valid:
-            print("Mac is invalid!!!")
 
         print("Got alert level: %x, description: %x" % (alert_level, alert_description))
         if alert_description == "\x00":
