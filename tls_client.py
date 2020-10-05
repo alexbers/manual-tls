@@ -1,7 +1,7 @@
 from Crypto.Cipher import AES
 from Crypto.PublicKey import RSA
-from Crypto.Signature import pkcs1_15
-from Crypto.Hash import SHA1
+from Crypto.Signature import pkcs1_15, pss
+from Crypto.Hash import SHA1, SHA256
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -10,35 +10,31 @@ import hmac
 import socket
 import sys
 
-HOST = "wiki.python.org"
-PORT = 443
+# for now no hosts support diffie hellman key exchange over tls 1.3, will fix soon
+HOST = "127.0.0.1"
+PORT = 4433
 
 TIMEOUT = 10
 
 # tls 1.2 for legacy reasons, tls 1.3 will be send in extensions as required
 LEGACY_TLS_VERSION = b"\x03\x03"
 
-TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 = b"\x00\x9e"
+TLS_AES_128_GCM_SHA256 = b"\x13\x01"
 
 CHANGE_CIPHER = b"\x14"
 ALERT = b"\x15"
 HANDSHAKE = b"\x16"
 APPLICATION_DATA = b"\x17"
 
-SHA1_ALG = 2
-RSA_ALG = 1
-
-TAG_LEN = 16
-
 
 # CYPHER INFO HELPERS
 def get_key_len(algo):
-    keylens = {TLS_DHE_RSA_WITH_AES_128_GCM_SHA256: 16}
+    keylens = {TLS_AES_128_GCM_SHA256: 16}
     return keylens[algo]
 
 
 def get_iv_len(algo):
-    ivlens = {TLS_DHE_RSA_WITH_AES_128_GCM_SHA256: 4}
+    ivlens = {TLS_AES_128_GCM_SHA256: 4}
     return ivlens[algo]
 
 
@@ -54,6 +50,13 @@ def num_to_bytes(num, bytes_len=None):
     return int.to_bytes(num, bytes_len, "big")
 
 
+def xor(a, b):
+    ans = bytearray()
+    for i in range(len(a)):
+        ans.append(a[i] ^ b[i])
+    return bytes(ans)
+
+
 # NETWORK AND LOW LEVEL TLS PROTOCOL HELPERS
 def recv_num_bytes(s, num):
     ret = b""
@@ -66,15 +69,14 @@ def recv_num_bytes(s, num):
         ret += data
 
     assert len(ret) == num
-
     return ret
 
 
 def recv_tls(s):
     rec_type = recv_num_bytes(s, 1)
 
-    LEGACY_tls_version = recv_num_bytes(s, 2)
-    assert LEGACY_tls_version == LEGACY_TLS_VERSION
+    tls_version = recv_num_bytes(s, 2)
+    assert tls_version == LEGACY_TLS_VERSION
 
     rec_len = bytes_to_num(recv_num_bytes(s, 2))
     rec = recv_num_bytes(s, rec_len)
@@ -88,49 +90,121 @@ def send_tls(s, rec_type, msg):
 
 
 # MESSAGE AUTENTICATION CODES AND HASHING HELPERS
-def compute_prf_hash(data, key, hash_len):
+def hkdf_extract(data, key):
+    hmac_digest = hmac.new(key, data, hashlib.sha256).digest()
+    return bytes(hmac_digest)
+
+
+def hkdf_expand(data, key, hash_len):
     sha256_result = bytearray()
 
-    hmac_digest = hmac.new(key, data, hashlib.sha256).digest()
-
+    i = 1
     while len(sha256_result) < hash_len:
-        sha256_result += hmac.new(key, hmac_digest + data, hashlib.sha256).digest()
-        hmac_digest = hmac.new(key, hmac_digest, hashlib.sha256).digest()
+        sha256_result += hmac.new(key, sha256_result[-32:] + data + num_to_bytes(i, 1), hashlib.sha256).digest()
+        i += 1
     sha256_result = sha256_result[:hash_len]
 
     return bytes(sha256_result)
 
 
+def derive_secret(label, data, key, hash_len):
+    full_label = b"tls13 " + label
+    packed_data = (num_to_bytes(hash_len, 2) + num_to_bytes(len(full_label), 1) +
+                   full_label + num_to_bytes(len(data), 1) + data)
+
+    secret = hkdf_expand(data=packed_data, key=key, hash_len=hash_len)
+    return secret
+
+
+def do_authenticated_encryption(key, nonce_base, seq_num, msg_type, payload):
+    TAG_LEN = 16
+    nonce = xor(nonce_base, num_to_bytes(seq_num, 12))
+
+    payload = payload + msg_type
+    data = APPLICATION_DATA + LEGACY_TLS_VERSION + num_to_bytes(len(payload)+TAG_LEN, 2)
+
+    encrypted_msg = AESGCM(key).encrypt(nonce, payload, associated_data=data)
+    return encrypted_msg
+
+
+def do_authenticated_decryption(key, nonce_start, seq_num, msg_type, payload):
+    nonce = xor(nonce_start, num_to_bytes(seq_num, 12))
+
+    # print("decrypted", AES.new(key, AES.MODE_GCM, nonce=nonce).decrypt(payload).hex())
+    data = msg_type + LEGACY_TLS_VERSION + num_to_bytes(len(payload), 2)
+    msg = AESGCM(key).decrypt(nonce, payload, associated_data=data)
+    msg_type, msg_data = msg[-1:], msg[:-1]
+    return msg_type, msg_data
+
+
+def decrypt_msg(server_write_key, server_write_nonce, seq_num, encrypted_msg):
+    msg_type, msg_data = do_authenticated_decryption(server_write_key, server_write_nonce,
+                                                     seq_num, APPLICATION_DATA, encrypted_msg)
+    return msg_type, msg_data
+
+
+def recv_tls_and_decrypt(s, key, nonce, seq_num, rec_type=APPLICATION_DATA, enc_rec_type=HANDSHAKE):
+    got_rec_type, encrypted_msg = recv_tls(s)
+    assert got_rec_type == rec_type
+
+    got_enc_rec_type, msg = decrypt_msg(key, nonce, seq_num, encrypted_msg)
+    assert got_enc_rec_type == enc_rec_type
+
+    return msg
+
+
 # PACKET GENERATORS AND HANDLERS
-def gen_client_hello(client_random):
+def gen_client_hello(client_random, my_dh_pub):
     CLIENT_HELLO = b"\x01"
 
     client_version = LEGACY_TLS_VERSION  # tls 1.0, compat with old implementations
 
-    unix_time = client_random[:4]
-    random_bytes = client_random[4:]
-
     session_id_len = b"\x00"
     session_id = b""
 
-    cipher_suites_len = num_to_bytes(2, 2)  # only TLS_DHE_RSA_WITH_AES_128_GCM_SHA256
+    cipher_suites_len = num_to_bytes(2, 2)  # only TLS_AES_128_GCM_SHA256
 
     compression_method_len = b"\x01"
     compression_method = b"\x00"  # no compression
 
-    extensions_len = b"\x00\x07"
     supported_versions = b"\x00\x2b"
     supported_versions_length = b"\x00\x03"
     another_supported_versions_length = b"\x02"
     tls1_3_version = b"\x03\x04"
 
-    extensions = (extensions_len + supported_versions + supported_versions_length +
-                  another_supported_versions_length + tls1_3_version)
+    signature_algos = b"\x00\x0d"
+    signature_algos_length = b"\x00\x04"
+    another_signature_algos_length = b"\x00\x02"
+    rsa_pkcs1_sha256_algo = b"\x04\x01"
+    rsa_pss_rsae_sha256_algo = b"\x08\x04"
+    # rsa_pkcs1_sha256_algo = b"\x04\x01"
 
-    client_hello_data = (client_version + unix_time + random_bytes +
+    supported_groups = b"\x00\x0a"
+    supported_groups_length = b"\x00\x04"
+    another_supported_groups_length = b"\x00\x02"
+    ffdhe2048_group = b"\x01\x00"
+
+    key_share = b"\x00\x33"
+    key_share_length = num_to_bytes(256 + 4 + 2, 2)
+    another_key_share_length = num_to_bytes(256 + 4, 2)
+    ffdhe2048_group = b"\x01\x00"
+    key_exchange_len = num_to_bytes(256, 2)
+    key_exchange = num_to_bytes(my_dh_pub, 256)
+
+    extensions = (supported_versions + supported_versions_length +
+                  another_supported_versions_length + tls1_3_version +
+                  signature_algos + signature_algos_length + another_signature_algos_length +
+                  rsa_pss_rsae_sha256_algo +
+                  supported_groups + supported_groups_length + another_supported_groups_length +
+                  ffdhe2048_group +
+                  key_share + key_share_length + another_key_share_length +
+                  ffdhe2048_group + key_exchange_len + key_exchange)
+
+    client_hello_data = (client_version + client_random +
                          session_id_len + session_id + cipher_suites_len +
-                         TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 +
-                         compression_method_len + compression_method)
+                         TLS_AES_128_GCM_SHA256 +
+                         compression_method_len + compression_method +
+                         num_to_bytes(len(extensions), 2)) + extensions
 
     client_hello_tlv = CLIENT_HELLO + num_to_bytes(len(client_hello_data), 3) + client_hello_data
 
@@ -156,7 +230,37 @@ def handle_server_hello(server_hello):
     cipher_suite = server_hello[39 + session_id_len: 39 + session_id_len + 2]
     compression_method = server_hello[39 + session_id_len + 2: 39 + session_id_len + 3]
 
-    return server_random, session_id
+    extensions_length = bytes_to_num(server_hello[39 + session_id_len + 3: 39 + session_id_len + 3 + 2])
+    extensions = server_hello[39 + session_id_len + 3 + 2: 39 + session_id_len + 3 + 2 + extensions_length]
+
+    dh_Ys = 0
+    ptr = 0
+    while ptr < extensions_length:
+        extension_type = extensions[ptr: ptr + 2]
+        extension_length = bytes_to_num(extensions[ptr+2: ptr + 4])
+        print("extension_length", extension_length)
+        KEY_SHARE = b"\x00\x33"
+        if extension_type != KEY_SHARE:
+            ptr += extension_length + 4
+            continue
+        group = extensions[ptr+4: ptr+6]
+        ffdhe2048_group = b"\x01\x00"
+        assert group == ffdhe2048_group
+        key_exchange_len = bytes_to_num(extensions[ptr+6: ptr+8])
+
+        dh_Ys = bytes_to_num(extensions[ptr+8:ptr+8+key_exchange_len])
+        break
+
+    return server_random, session_id, dh_Ys
+
+
+def handle_encrypted_extensions(msg):
+    ENCRYPTED_EXTENSIONS = 0x8
+
+    assert msg[0] == ENCRYPTED_EXTENSIONS
+    extensions_length = bytes_to_num(msg[1:4])
+    assert len(msg[4:]) >= extensions_length
+    # ignore the rest
 
 
 def handle_server_cert(server_cert_data):
@@ -166,99 +270,56 @@ def handle_server_cert(server_cert_data):
     assert handshake_type == CERTIFICATE
 
     certificate_field_len = bytes_to_num(server_cert_data[1:4])
-    certificates_len = bytes_to_num(server_cert_data[4:7])
 
     certificates = []
 
-    cert_string_left = server_cert_data[7: 7 + certificates_len]
+    cert_string_left = server_cert_data[4: 4 + certificate_field_len]
     while cert_string_left:
-        cert_len = bytes_to_num(cert_string_left[:3])
+        cert_type = cert_string_left[0]
+        cert_entry_len = bytes_to_num(cert_string_left[1:4])
 
-        certificates.append(cert_string_left[3: 3 + cert_len])
+        cert_len = bytes_to_num(cert_string_left[4:7])
 
-        cert_string_left = cert_string_left[3 + cert_len:]
+        certificates.append(cert_string_left[7: 7 + cert_len])
+        cert_string_left = cert_string_left[4 + cert_entry_len:]
 
     return certificates
 
 
-def handle_server_key_exchange(server_key_exchange_data):
-    handshake_type = server_key_exchange_data[0]
+def handle_cert_verify(cert_verify_data, rsa, msgs_so_far):
+    handshake_type = cert_verify_data[0]
 
-    SERVER_KEY_EXCHANGE = 0x0c
-    assert handshake_type == SERVER_KEY_EXCHANGE
+    CERTIFICATE_VERIFY = 0x0f
+    assert handshake_type == CERTIFICATE_VERIFY
 
-    server_key_exchange_data_len = bytes_to_num(server_key_exchange_data[1: 4])
+    cert_verify_len = bytes_to_num(cert_verify_data[1:4])
+    assert len(cert_verify_data[4:]) >= cert_verify_len
 
-    dh_p_len = bytes_to_num(server_key_exchange_data[4: 6])
-    dh_p = bytes_to_num(server_key_exchange_data[6: 6 + dh_p_len])
+    cert_verify_method = cert_verify_data[4:6]
+    signature_len = bytes_to_num(cert_verify_data[6:8])
+    signature = cert_verify_data[8: 8+signature_len]
 
-    cur_pos = 6 + dh_p_len  # curpos is just for shorting
-    dh_g_len = bytes_to_num(server_key_exchange_data[cur_pos: cur_pos + 2])
-
-    cur_pos += 2
-    dh_g = bytes_to_num(server_key_exchange_data[cur_pos: cur_pos + dh_g_len])
-
-    cur_pos += dh_g_len
-    dh_Ys_len = bytes_to_num(server_key_exchange_data[cur_pos: cur_pos + 2])  # (g^X mod p)
-
-    cur_pos += 2
-    dh_Ys = bytes_to_num(server_key_exchange_data[cur_pos: cur_pos + dh_Ys_len])
-
-    cur_pos += dh_Ys_len
-    dh_hash_alg = bytes_to_num(server_key_exchange_data[cur_pos: cur_pos + 1])
-    assert dh_hash_alg == SHA1_ALG
-
-    cur_pos += 1
-    dh_sign_alg = bytes_to_num(server_key_exchange_data[cur_pos: cur_pos + 1])
-    assert dh_sign_alg == RSA_ALG
-
-    cur_pos += 1
-    dh_sign_len = bytes_to_num(server_key_exchange_data[cur_pos: cur_pos + 2])
-
-    cur_pos += 2
-    dh_sign = bytes_to_num(server_key_exchange_data[cur_pos: cur_pos + dh_sign_len])
-
-    return dh_p, dh_g, dh_Ys, dh_sign
-
-
-def validate_signature(rsa, client_random, server_random, dh_p, dh_g, dh_Ys, dh_sign):
-    dh_p_raw = num_to_bytes(dh_p)
-    dh_g_raw = num_to_bytes(dh_g)
-    dh_Ys_raw = num_to_bytes(dh_Ys)
-
-    text = client_random + server_random
-    text += num_to_bytes(len(dh_p_raw), 2) + dh_p_raw
-    text += num_to_bytes(len(dh_g_raw), 2) + dh_g_raw
-    text += num_to_bytes(len(dh_Ys_raw), 2) + dh_Ys_raw
+    message = b" " * 64 + b"TLS 1.3, server CertificateVerify" + b"\x00" + hashlib.sha256(msgs_so_far).digest()
 
     try:
-        sha_hash = SHA1.new(text)
-        pkcs1_15.new(rsa).verify(sha_hash, num_to_bytes(dh_sign))
-        return True
+        pss.new(rsa).verify(SHA256.new(message), signature)
     except ValueError:
-        return False
+        print("Warning: Certificate signature is wrong!")
 
 
-def gen_client_key_exchange(my_dh_pub):
-    CLIENT_KEY_EXCHANGE = b"\x10"
+def handle_finished(finished_data, server_finished_key, msgs_so_far):
+    handshake_type = finished_data[0]
 
-    dh_pubkey = num_to_bytes(my_dh_pub)
-    dh_params = num_to_bytes(len(dh_pubkey), 2) + dh_pubkey
+    FINISHED = 0x14
+    assert handshake_type == FINISHED
 
-    client_key_exchange_tlv = CLIENT_KEY_EXCHANGE + num_to_bytes(len(dh_params), 3) + dh_params
+    verify_data_len = bytes_to_num(finished_data[1:4])
+    verify_data = finished_data[4:4+verify_data_len]
 
-    return client_key_exchange_tlv
+    msgs_digest = hashlib.sha256(msgs_so_far).digest()
+    hmac_digest = hmac.new(server_finished_key, msgs_digest, hashlib.sha256).digest()
 
-
-def compute_master_secret(client_random, server_random, our_secret):
-    TLS_MAX_MASTER_KEY_LENGTH = 48
-    return compute_prf_hash(b"master secret" + client_random + server_random,
-                            our_secret, TLS_MAX_MASTER_KEY_LENGTH)
-
-
-def compute_key_block(master_secret, key_block_len):
-    return compute_prf_hash(b"key expansion" + server_random + client_random,
-                            master_secret, key_block_len)
+    return verify_data == hmac_digest
 
 
 def gen_change_cipher():
@@ -266,229 +327,190 @@ def gen_change_cipher():
     return CHANGE_CIPHER_SPEC_MSG
 
 
-def do_authenticated_encryption(key, nonce_start, seq_num, msg_type, msg):
-    # totaly not secure, it should be random
-    nonce_end = b"\x00" * 8
-    nonce = nonce_start + nonce_end
-
-    data = num_to_bytes(seq_num, 8) + msg_type + LEGACY_TLS_VERSION + num_to_bytes(len(msg), 2)
-    encrypted_msg = AESGCM(key).encrypt(nonce, msg, associated_data=data)
-    return nonce_end + encrypted_msg
-
-
-def do_authenticated_decryption(key, nonce_start, seq_num, msg_type, payload):
-    nonce_end, msg, tag = payload[:8], payload[8:-TAG_LEN], payload[-TAG_LEN:]
-    nonce = nonce_start + nonce_end
-
-    data = num_to_bytes(seq_num, 8) + msg_type + LEGACY_TLS_VERSION + num_to_bytes(len(msg), 2)
-    msg = AESGCM(key).decrypt(nonce, msg + tag, associated_data=data)
-    return msg
-
-
-def gen_encrypted_hangshake_msg(client_write_key, client_write_nonce_start, seq_num,
-                                client_finish_val):
+def gen_encrypted_finished(client_write_key, client_write_iv, client_seq_num, client_finish_val):
     FINISHED = b"\x14"
 
     msg = FINISHED + num_to_bytes(len(client_finish_val), 3) + client_finish_val
-    encrypted_msg = do_authenticated_encryption(client_write_key, client_write_nonce_start,
-                                                seq_num, HANDSHAKE, msg)
-    return msg, encrypted_msg
 
-
-def handle_server_change_cipher(server_change_cipher):
-    CHANGE_CIPHER_SPEC_MSG = b"\x01"
-    assert server_change_cipher == CHANGE_CIPHER_SPEC_MSG
-
-
-def handle_encrypted_hangshake_msg(server_write_key, server_write_nonce_start, seq_num,
-                                   encrypted_msg, computed_server_finish_val):
-    # we use HANDSHAKE as record type because this function will be called if
-    # the record type is HANDSHAKE
-    payload = do_authenticated_decryption(server_write_key, server_write_nonce_start,
-                                          seq_num, HANDSHAKE, encrypted_msg)
-
-    handshake_type = payload[0]
-
-    FINISHED = 0x14
-    assert handshake_type == FINISHED
-
-    server_finish_val_len = bytes_to_num(payload[1:4])
-    server_finish_val = payload[4:]
-    assert len(server_finish_val) == server_finish_val_len
-
-    server_finish_val_is_valid = (computed_server_finish_val == server_finish_val)
-    return server_finish_val_is_valid
-
-
-def gen_encrypted_appdata_msg(client_write_key, client_write_nonce_start, seq_num, msg):
-    encrypted_msg = do_authenticated_encryption(client_write_key, client_write_nonce_start,
-                                                seq_num, APPLICATION_DATA, msg)
-    return encrypted_msg
-
-
-def handle_encrypted_appdata_msg(server_write_key, server_write_nonce_start, seq_num,
-                                 encrypted_msg):
-    payload = do_authenticated_decryption(server_write_key, server_write_nonce_start,
-                                          seq_num, APPLICATION_DATA, encrypted_msg)
-    return payload
-
-
-def handle_encrypted_alert(server_write_key, server_write_nonce_start, seq_num, encrypted_msg):
-    payload = do_authenticated_decryption(server_write_key, server_write_nonce_start,
-                                          seq_num, ALERT, encrypted_msg)
-
-    alert_level, alert_description = payload
-    return alert_level, alert_description
+    return do_authenticated_encryption(client_write_key, client_write_iv, client_seq_num,
+                                       HANDSHAKE, msg)
 
 
 print("Connecting to %s:%d" % (HOST, PORT))
 s = socket.create_connection((HOST, PORT), TIMEOUT)
-print("Connected")
 
 print("Handshake: sending a client hello")
 client_random = b"\xAB" * 32
 print("Client random: %s" % client_random.hex())
 
-client_hello = gen_client_hello(client_random)
+dh_p = 0xffffffffffffffffadf85458a2bb4a9aafdc5620273d3cf1d8b9c583ce2d3695a9e13641146433fbcc939dce249b3ef97d2fe363630c75d8f681b202aec4617ad3df1ed5d5fd65612433f51f5f066ed0856365553ded1af3b557135e7f57c935984f0c70e0e68b77e2a689daf3efe8721df158a136ade73530acca4f483a797abc0ab182b324fb61d108a94bb2c8e3fbb96adab760d7f4681d4f42a3de394df4ae56ede76372bb190b07a7c8ee0a6d709e02fce1cdf7e2ecc03404cd28342f619172fe9ce98583ff8e4f1232eef28183c3fe3b1b4c6fad733bb5fcbc2ec22005c58ef1837d1683b2c6f34a26c1b2effa886b423861285c97ffffffffffffffff
+dh_g = 0x2
+
+my_dh_secretY = bytes_to_num(b"\x01"*256)
+
+my_dh_pub = pow(dh_g, my_dh_secretY, dh_p)
+print("My DH pubkey: %x" % my_dh_pub)
+
+client_hello = gen_client_hello(client_random, my_dh_pub)
 send_tls(s, HANDSHAKE, client_hello)
 
+###########################
 print("Handshake: receiving a server hello")
 rec_type, server_hello = recv_tls(s)
 
 if rec_type == ALERT:
     print("Server sent us ALERT, it probably doesn't support " +
-          "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 algo")
+          "TLS_AES_128_GCM_SHA256 algo")
     sys.exit(1)
 
 assert rec_type == HANDSHAKE
 
-server_random, session_id = handle_server_hello(server_hello)
+server_random, session_id, dh_Ys = handle_server_hello(server_hello)
 print("Server random: %s" % server_random.hex())
 print("Session id: %s" % session_id.hex())
+print("Server DH pubkey: %x" % dh_Ys)
 
-print("Handshake: receiving server certs")
-rec_type, server_cert_data = recv_tls(s)
-assert rec_type == HANDSHAKE
-
-certs = handle_server_cert(server_cert_data)
-print("Got %d certs" % len(certs))
-
-rsa = RSA.import_key(certs[0])
-
-print("Handshake: receiving a server key exchange")
-rec_type, server_key_exchange_data = recv_tls(s)
-assert rec_type == HANDSHAKE
-
-dh_p, dh_g, dh_Ys, dh_sign = handle_server_key_exchange(server_key_exchange_data)
-print("DH prime: %x" % dh_p)
-print("DH generator: %x" % dh_g)
-print("DH pubkey: %x" % dh_Ys)
-print("DH signature: %x" % dh_sign)
-
-sign_is_valid = validate_signature(rsa, client_random, server_random, dh_p, dh_g, dh_Ys, dh_sign)
-if sign_is_valid:
-    print("Server DH signature is VALID")
-else:
-    print("Server DH signature is INVALID!!!")
-
-print("Handshake: receiving a server hello done")
-rec_type, handshake_data = recv_tls(s)
-assert rec_type == HANDSHAKE
-
-my_secretY = 10
-
-my_pub = pow(dh_g, my_secretY, dh_p)
-print("My DH pubkey: %x" % my_pub)
-
-our_secret = pow(dh_Ys, my_secretY, dh_p)
+our_secret = pow(dh_Ys, my_dh_secretY, dh_p)
 print("Our common DH secret (premaster secret) is: %x" % our_secret)
 
-print("Handshake: sending a client key exchange")
-client_key_exchange_data = gen_client_key_exchange(my_pub)
-send_tls(s, HANDSHAKE, client_key_exchange_data)
-
-our_master_secret = compute_master_secret(client_random, server_random, num_to_bytes(our_secret))
-print("Our master key: %s" % our_master_secret.hex())
-
-key_block_len = (get_key_len(TLS_DHE_RSA_WITH_AES_128_GCM_SHA256) +
-                 get_iv_len(TLS_DHE_RSA_WITH_AES_128_GCM_SHA256)
-                 ) * 2
-key_block = compute_key_block(our_master_secret, key_block_len)
-
-print("Our keyblock: %s" % key_block.hex())
-
-# hack, valid only on TLS_DHE_RSA_WITH_AES_128_GCM_SHA256
-client_write_key = key_block[0:16]
-server_write_key = key_block[16:32]
-client_write_nonce_start = key_block[32:36]
-server_write_nonce_start = key_block[36:40]
-
-print("Client key: %s nonce_start: %s" % (client_write_key.hex(), client_write_nonce_start.hex()))
-print("Server key: %s nonce_start: %s" % (server_write_key.hex(), server_write_nonce_start.hex()))
-
-all_handshake_pkts = (client_hello + server_hello + server_cert_data +
-                      server_key_exchange_data + handshake_data +
-                      client_key_exchange_data)
-
-all_handshake_pkts_sha256 = hashlib.sha256(all_handshake_pkts).digest()
-
-client_finish_val = compute_prf_hash(b"client finished" +
-                                     all_handshake_pkts_sha256, our_master_secret, 12)
-
-print("Client finish val: %s" % client_finish_val.hex())
-
-client_seq_num = 0  # for use in authenticated encryption
-server_seq_num = 0
-
-print("Handshake: sending a change cipher msg")
-change_cipher = gen_change_cipher()
-send_tls(s, CHANGE_CIPHER, change_cipher)
-
-# All client messages beyond this point are encrypted
-
-print("Handshake: sending an encrypted handshake msg")
-raw_msg, encrypted_hangshake_msg = gen_encrypted_hangshake_msg(client_write_key,
-                                                               client_write_nonce_start,
-                                                               client_seq_num, client_finish_val)
-send_tls(s, HANDSHAKE, encrypted_hangshake_msg)
-client_seq_num += 1
-
-all_handshake_pkts += raw_msg
-all_handshake_pkts_sha256 = hashlib.sha256(all_handshake_pkts).digest()
-
-server_finish_val = compute_prf_hash(b"server finished" +
-                                     all_handshake_pkts_sha256,
-                                     our_master_secret, 12)
-print("Server finish val: %s" % server_finish_val.hex())
-
+###########################
 print("Handshake: receiving a change cipher msg")
 rec_type, server_change_cipher = recv_tls(s)
 assert rec_type == CHANGE_CIPHER
 
-handle_server_change_cipher(server_change_cipher)
+# the sha256 from empty msg is used
+derive_start_hash = hashlib.sha256(b"").digest()
+early_secret = hkdf_extract(data=b"\x00" * 32, key=b"")
+preextractsec = derive_secret(b"derived", data=derive_start_hash, key=early_secret, hash_len=32)
+handshake_secret = hkdf_extract(data=num_to_bytes(our_secret), key=preextractsec)
+hello_hash = hashlib.sha256(client_hello + server_hello).digest()
+server_hs_secret = derive_secret(b"s hs traffic", data=hello_hash, key=handshake_secret, hash_len=32)
+server_write_key = derive_secret(b"key", data=b"", key=server_hs_secret, hash_len=16)
+server_write_iv = derive_secret(b"iv", data=b"", key=server_hs_secret, hash_len=12)
+server_finished_key = derive_secret(b"finished", data=b"", key=server_hs_secret, hash_len=32)
+client_hs_secret = derive_secret(b"c hs traffic", data=hello_hash, key=handshake_secret, hash_len=32)
+client_write_key = derive_secret(b"key", data=b"", key=client_hs_secret, hash_len=16)
+client_write_iv = derive_secret(b"iv", data=b"", key=client_hs_secret, hash_len=12)
+client_finished_key = derive_secret(b"finished", data=b"", key=client_hs_secret, hash_len=32)
 
-print("Handshake: receiving an encrypted handshake msg")
-rec_type, server_encrypted_hangshake_msg = recv_tls(s)
+print("preextractsec", preextractsec.hex())
+print("handshake_secret", handshake_secret.hex())
+print("hello_hash", hello_hash.hex())
+print("server_hs_secret", server_hs_secret.hex())
+print("server_write_key", server_write_key.hex())
+print("server_write_iv", server_write_iv.hex())
+print("server_finished_key", server_finished_key.hex())
+print("client_hs_secret", client_hs_secret.hex())
+print("client_write_key", client_write_key.hex())
+print("client_write_iv", client_write_iv.hex())
+print("client_finished_key", client_finished_key.hex())
 
-server_finish_val_is_valid = (
-    handle_encrypted_hangshake_msg(
-        server_write_key, server_write_nonce_start, server_seq_num,
-        server_encrypted_hangshake_msg, server_finish_val)
-)
+
+client_seq_num = 0  # for use in authenticated encryption
+server_seq_num = 0
+
+###########################
+encrypted_extensions = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
 server_seq_num += 1
 
-print("Server finish val is valid: %s" % (server_finish_val_is_valid))
+print("encrypted_extensions", encrypted_extensions.hex())
+handle_encrypted_extensions(encrypted_extensions)
+
+###########################
+server_cert = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+server_seq_num += 1
+
+certs = handle_server_cert(server_cert)
+print("Got %d certs" % len(certs))
+
+rsa = RSA.import_key(certs[0])
+
+###########################
+cert_verify = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+server_seq_num += 1
+
+msgs_so_far = client_hello + server_hello + encrypted_extensions + server_cert
+handle_cert_verify(cert_verify, rsa, msgs_so_far)
+
+###########################
+finished = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+server_seq_num += 1
+
+msgs_so_far = msgs_so_far + cert_verify + finished
+srv_finish_ok = handle_finished(finished, server_finished_key, msgs_so_far)
+if srv_finish_ok:
+    print("Server sent valid finish handshake msg")
+else:
+    print("Warning: Server sent wrong handshake finished msg")
+
+###########################
+print("Handshake: sending a change cipher msg")
+change_cipher = gen_change_cipher()
+send_tls(s, CHANGE_CIPHER, change_cipher)
+
+###########################
+# All client messages beyond this point are encrypted
+
+msgs_sha256 = hashlib.sha256(msgs_so_far).digest()
+client_finish_val = hmac.new(client_finished_key, msgs_sha256, hashlib.sha256).digest()
+print("client_finish_val", client_finish_val.hex())
+
+print("Handshake: sending an encrypted finished msg")
+encrypted_hangshake_msg = gen_encrypted_finished(client_write_key, client_write_iv, client_seq_num,
+                                                 client_finish_val)
+send_tls(s, APPLICATION_DATA, encrypted_hangshake_msg)
+client_seq_num += 1
+
+print("encrypted_hangshake_msg", encrypted_hangshake_msg.hex())
 print("Handshake finished")
 
+###########################
+msgs_so_far_hash = hashlib.sha256(msgs_so_far).digest()
+
+# rederive application secrets
+premaster_secret = derive_secret(b"derived", data=derive_start_hash, key=handshake_secret, hash_len=32)
+master_secret = hkdf_extract(data=b"\x00" * 32, key=premaster_secret)
+server_secret = derive_secret(b"s ap traffic", data=msgs_so_far_hash, key=master_secret, hash_len=32)
+server_write_key = derive_secret(b"key", data=b"", key=server_secret, hash_len=16)
+server_write_iv = derive_secret(b"iv", data=b"", key=server_secret, hash_len=12)
+client_secret = derive_secret(b"c ap traffic", data=msgs_so_far_hash, key=master_secret, hash_len=32)
+client_write_key = derive_secret(b"key", data=b"", key=client_secret, hash_len=16)
+client_write_iv = derive_secret(b"iv", data=b"", key=client_secret, hash_len=12)
+
+print("After secrets regeneration")
+print("premaster_secret", premaster_secret.hex())
+print("master_secret", master_secret.hex())
+print("server_secret", server_secret.hex())
+print("server_write_key", server_write_key.hex())
+print("server_write_iv", server_write_iv.hex())
+print("client_secret", client_secret.hex())
+print("client_write_key", client_write_key.hex())
+print("client_write_iv", client_write_iv.hex())
+
+client_seq_num = 0
+server_seq_num = 0
+
+###########################
+new_session_ticket = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+print("new_session_ticket", new_session_ticket.hex())
+server_seq_num += 1
+
+###########################
+new_session_ticket = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+print("new_session_ticket", new_session_ticket.hex())
+server_seq_num += 1
+
+###########################
 # the rest is just for fun
 print("Sending GET /")
 request = b"""GET / HTTP/1.1\r\nHost: nohost\r\nConnection: close\r\n\r\n"""
 
-encrypted_msg = gen_encrypted_appdata_msg(client_write_key, client_write_nonce_start,
-                                          client_seq_num, request)
+encrypted_msg = do_authenticated_encryption(client_write_key, client_write_iv,
+                                            client_seq_num, APPLICATION_DATA, request)
 send_tls(s, APPLICATION_DATA, encrypted_msg)
 client_seq_num += 1
 
+###########################
 print("Receiving an answer")
 
 while True:
@@ -499,20 +521,17 @@ while True:
         break
 
     if rec_type == APPLICATION_DATA:
-        msg = handle_encrypted_appdata_msg(server_write_key, server_write_nonce_start,
-                                           server_seq_num, server_encrypted_msg)
+        msg_type, msg = decrypt_msg(server_write_key, server_write_iv,
+                                    server_seq_num, server_encrypted_msg)
         server_seq_num += 1
-        print("Got: %s" % msg)
-    elif rec_type == ALERT:
-        alert_level, alert_description = (
-            handle_encrypted_alert(server_write_key, server_write_nonce_start,
-                                   server_seq_num, server_encrypted_msg)
-        )
-        server_seq_num += 1
+        if msg_type == APPLICATION_DATA:
+            print("Got: %s" % msg.decode())
+        elif msg_type == ALERT:
+            alert_level, alert_description = msg
 
-        print("Got alert level: %x, description: %x" % (alert_level, alert_description))
-        if alert_description == "\x00":
-            print("Server sent close_notify, no waiting for more data")
-            break
+            print("Got alert level: %x, description: %x" % (alert_level, alert_description))
+            if alert_description == 0:
+                print("Server sent close_notify, no waiting for more data")
+                break
     else:
         print("Got msg with unknown rec_type")

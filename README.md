@@ -1,6 +1,8 @@
 # manual-tls #
 
-A simple example of manual tls 1.2 connection with Diffie–Hellman key exchange
+A simple example of manual tls 1.3 connection with Diffie–Hellman key exchange.
+This mode is almost not supported by tls servers yet, will move to Elliptic
+Curves soon.
 
 ## Motivation ##
 
@@ -17,8 +19,8 @@ read.
 
 This python project implements tls manually. It not tries to implement all 
 variety of key-exchange and encryption protocols. Instead it implements only 
-one - TLS 1.0 with Diffie-Hellman key exchange, AES-256 encryption with 
-Cipher-block chaining and SHA1 hashing algo. Also it not supports advanced 
+one - TLS 1.3 with Diffie-Hellman key exchange, AES-128 encryption in 
+Galois/Counter mode and SHA256 hashing algo. Also it not supports advanced 
 features like client's authentication, compression, session tickets, etc. It
 even doesn't support server certificate chain validation. But without all this 
 the code is sipmpler.
@@ -33,8 +35,8 @@ the tls protocol.
 
 ## Requirements ##
 
-* Python 2.7
-* M2Crypto python module
+* Python 3.6
+* PyCryptodome and and cryptography python modules
 
 ## Usage ##
 
