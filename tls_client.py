@@ -4,6 +4,10 @@ from Crypto.Signature import pkcs1_15, pss
 from Crypto.Hash import SHA1, SHA256
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+
+import tinyec.ec as ec
+import tinyec.registry as reg
 
 import hashlib
 import hmac
@@ -11,8 +15,8 @@ import socket
 import sys
 
 # for now no hosts support diffie hellman key exchange over tls 1.3, will fix soon
-HOST = "127.0.0.1"
-PORT = 4433
+HOST = "github.com"
+PORT = 443
 
 TIMEOUT = 10
 
@@ -154,7 +158,7 @@ def recv_tls_and_decrypt(s, key, nonce, seq_num, rec_type=APPLICATION_DATA, enc_
 
 
 # PACKET GENERATORS AND HANDLERS
-def gen_client_hello(client_random, my_dh_pub):
+def gen_client_hello(client_random, private_ec_key):
     CLIENT_HELLO = b"\x01"
 
     client_version = LEGACY_TLS_VERSION  # tls 1.0, compat with old implementations
@@ -182,23 +186,24 @@ def gen_client_hello(client_random, my_dh_pub):
     supported_groups = b"\x00\x0a"
     supported_groups_length = b"\x00\x04"
     another_supported_groups_length = b"\x00\x02"
-    ffdhe2048_group = b"\x01\x00"
+    # x25519_group = b"\x00\x1d"
+    secp256r1_group = b"\x00\x17"
 
     key_share = b"\x00\x33"
-    key_share_length = num_to_bytes(256 + 4 + 2, 2)
-    another_key_share_length = num_to_bytes(256 + 4, 2)
-    ffdhe2048_group = b"\x01\x00"
-    key_exchange_len = num_to_bytes(256, 2)
-    key_exchange = num_to_bytes(my_dh_pub, 256)
+    key_share_length = num_to_bytes(len(private_ec_key) + 4 + 2, 2)
+    another_key_share_length = num_to_bytes(len(private_ec_key) + 4, 2)
+    # x25519_group = b"\x01\x00"
+    key_exchange_len = num_to_bytes(len(private_ec_key), 2)
+    key_exchange = private_ec_key
 
     extensions = (supported_versions + supported_versions_length +
                   another_supported_versions_length + tls1_3_version +
                   signature_algos + signature_algos_length + another_signature_algos_length +
                   rsa_pss_rsae_sha256_algo +
                   supported_groups + supported_groups_length + another_supported_groups_length +
-                  ffdhe2048_group +
+                  secp256r1_group +
                   key_share + key_share_length + another_key_share_length +
-                  ffdhe2048_group + key_exchange_len + key_exchange)
+                  secp256r1_group + key_exchange_len + key_exchange)
 
     client_hello_data = (client_version + client_random +
                          session_id_len + session_id + cipher_suites_len +
@@ -233,7 +238,7 @@ def handle_server_hello(server_hello):
     extensions_length = bytes_to_num(server_hello[39 + session_id_len + 3: 39 + session_id_len + 3 + 2])
     extensions = server_hello[39 + session_id_len + 3 + 2: 39 + session_id_len + 3 + 2 + extensions_length]
 
-    dh_Ys = 0
+    public_ec_key = b""
     ptr = 0
     while ptr < extensions_length:
         extension_type = extensions[ptr: ptr + 2]
@@ -244,14 +249,15 @@ def handle_server_hello(server_hello):
             ptr += extension_length + 4
             continue
         group = extensions[ptr+4: ptr+6]
-        ffdhe2048_group = b"\x01\x00"
-        assert group == ffdhe2048_group
+        # x25519_group = b"\x00\x1d"
+        secp256r1_group = b"\x00\x17"
+        assert group == secp256r1_group
         key_exchange_len = bytes_to_num(extensions[ptr+6: ptr+8])
 
-        dh_Ys = bytes_to_num(extensions[ptr+8:ptr+8+key_exchange_len])
+        public_ec_key = extensions[ptr+8:ptr+8+key_exchange_len]
         break
 
-    return server_random, session_id, dh_Ys
+    return server_random, session_id, public_ec_key
 
 
 def handle_encrypted_extensions(msg):
@@ -343,15 +349,15 @@ print("Handshake: sending a client hello")
 client_random = b"\xAB" * 32
 print("Client random: %s" % client_random.hex())
 
-dh_p = 0xffffffffffffffffadf85458a2bb4a9aafdc5620273d3cf1d8b9c583ce2d3695a9e13641146433fbcc939dce249b3ef97d2fe363630c75d8f681b202aec4617ad3df1ed5d5fd65612433f51f5f066ed0856365553ded1af3b557135e7f57c935984f0c70e0e68b77e2a689daf3efe8721df158a136ade73530acca4f483a797abc0ab182b324fb61d108a94bb2c8e3fbb96adab760d7f4681d4f42a3de394df4ae56ede76372bb190b07a7c8ee0a6d709e02fce1cdf7e2ecc03404cd28342f619172fe9ce98583ff8e4f1232eef28183c3fe3b1b4c6fad733bb5fcbc2ec22005c58ef1837d1683b2c6f34a26c1b2effa886b423861285c97ffffffffffffffff
-dh_g = 0x2
 
-my_dh_secretY = bytes_to_num(b"\x01"*256)
+curve = reg.get_curve("secp256r1")
 
-my_dh_pub = pow(dh_g, my_dh_secretY, dh_p)
-print("My DH pubkey: %x" % my_dh_pub)
+our_ecdh_privkey = 1234
+our_ecdh_pubkey = our_ecdh_privkey * curve.g
 
-client_hello = gen_client_hello(client_random, my_dh_pub)
+private_ec_key = b"\x04" + num_to_bytes(our_ecdh_pubkey.x, 32) + num_to_bytes(our_ecdh_pubkey.y, 32)
+
+client_hello = gen_client_hello(client_random, private_ec_key)
 send_tls(s, HANDSHAKE, client_hello)
 
 ###########################
@@ -365,13 +371,17 @@ if rec_type == ALERT:
 
 assert rec_type == HANDSHAKE
 
-server_random, session_id, dh_Ys = handle_server_hello(server_hello)
+server_random, session_id, public_ec_key = handle_server_hello(server_hello)
 print("Server random: %s" % server_random.hex())
 print("Session id: %s" % session_id.hex())
-print("Server DH pubkey: %x" % dh_Ys)
+print("Server ECDH pubkey: %s" % public_ec_key.hex())
 
-our_secret = pow(dh_Ys, my_dh_secretY, dh_p)
-print("Our common DH secret (premaster secret) is: %x" % our_secret)
+server_ecdh_pubkey = ec.Point(curve, bytes_to_num(public_ec_key[1:33]), bytes_to_num(public_ec_key[33:]))
+
+our_secret_point = our_ecdh_privkey * server_ecdh_pubkey
+our_secret = num_to_bytes(our_secret_point.x, 32)
+
+print("Our common DH secret (premaster secret) is: %s" % our_secret.hex())
 
 ###########################
 print("Handshake: receiving a change cipher msg")
@@ -382,7 +392,7 @@ assert rec_type == CHANGE_CIPHER
 derive_start_hash = hashlib.sha256(b"").digest()
 early_secret = hkdf_extract(data=b"\x00" * 32, key=b"")
 preextractsec = derive_secret(b"derived", data=derive_start_hash, key=early_secret, hash_len=32)
-handshake_secret = hkdf_extract(data=num_to_bytes(our_secret), key=preextractsec)
+handshake_secret = hkdf_extract(data=our_secret, key=preextractsec)
 hello_hash = hashlib.sha256(client_hello + server_hello).digest()
 server_hs_secret = derive_secret(b"s hs traffic", data=hello_hash, key=handshake_secret, hash_len=32)
 server_write_key = derive_secret(b"key", data=b"", key=server_hs_secret, hash_len=16)
@@ -502,8 +512,8 @@ server_seq_num += 1
 
 ###########################
 # the rest is just for fun
-print("Sending GET /")
-request = b"""GET / HTTP/1.1\r\nHost: nohost\r\nConnection: close\r\n\r\n"""
+request = b"""GET / HTTP/1.1\r\nHost: github.com\r\nConnection: close\r\n\r\n"""
+print("Sending", request)
 
 encrypted_msg = do_authenticated_encryption(client_write_key, client_write_iv,
                                             client_seq_num, APPLICATION_DATA, request)
@@ -525,7 +535,7 @@ while True:
                                     server_seq_num, server_encrypted_msg)
         server_seq_num += 1
         if msg_type == APPLICATION_DATA:
-            print("Got: %s" % msg.decode())
+            print("Got: %s" % msg.decode(errors="ignore"))
         elif msg_type == ALERT:
             alert_level, alert_description = msg
 

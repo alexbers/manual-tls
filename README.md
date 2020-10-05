@@ -1,8 +1,7 @@
 # manual-tls #
 
-A simple example of manual tls 1.3 connection with Diffie–Hellman key exchange.
-This mode is almost not supported by tls servers yet, will move to Elliptic
-Curves soon.
+A simple example of manual tls 1.3 connection with Elliptic Curves
+Diffie–Hellman key exchange.
 
 ## Motivation ##
 
@@ -19,11 +18,11 @@ read.
 
 This python project implements tls manually. It not tries to implement all 
 variety of key-exchange and encryption protocols. Instead it implements only 
-one - TLS 1.3 with Diffie-Hellman key exchange, AES-128 encryption in 
-Galois/Counter mode and SHA256 hashing algo. Also it not supports advanced 
-features like client's authentication, compression, session tickets, etc. It
-even doesn't support server certificate chain validation. But without all this 
-the code is sipmpler.
+one - TLS 1.3 with Elliptic Curve Diffie-Hellman key exchange, AES-128
+encryption in Galois/Counter mode and SHA256 hashing algo. Also it does not
+support advanced features like client's authentication, compression, session
+tickets, etc. It even doesn't support server certificate chain validation.
+But without all this the code is simpler.
 
 This program will help you to find an answer on "What if ...?" questions about 
 the tls protocol.
