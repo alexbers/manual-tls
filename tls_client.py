@@ -82,6 +82,39 @@ def multiply_num_on_ec_point(num, g_x, g_y, a, p):
     return result_x, result_y
 
 
+# CRYPTOGRAPHIC HASH FUNCTIONS
+def rotr(num, count):
+    return num >> count | num << (32 - count)
+
+
+def sha256(msg):
+    K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
+    msg += b"\x80" + b"\x00" * ((64-(len(msg) + 1 + 8)) % 64) + int.to_bytes(len(msg)*8, 8, "big")
+
+    ss = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+
+    for pos in range(0, len(msg), 64):
+        chunk = msg[pos:pos + 64]
+
+        w = [int.from_bytes(chunk[4*i:4*i+4], "big") for i in range(16)]
+        for i in range(16, 64):
+            a = rotr(w[i-15], 7) ^ rotr(w[i-15], 18) ^ (w[i-15] >> 3)
+            b = rotr(w[i-2], 17) ^ rotr(w[i-2], 19) ^ (w[i-2] >> 10)
+            w.append((a + b + w[i-16] + w[i-7]) & 0xffffffff)
+
+        s = ss.copy()
+        for i in range(64):
+            c = (s[4] & s[5]) ^ ((s[4] ^ 0xffffffff) & s[6])
+            t = K[i] + s[7] + c + w[i] + (rotr(s[4], 6) ^ rotr(s[4], 11) ^ rotr(s[4], 25))
+            q = rotr(s[0], 2) ^ rotr(s[0], 13) ^ rotr(s[0], 22)
+            m = (s[0] & s[1]) ^ (s[0] & s[2]) ^ (s[1] & s[2])
+            s = [(q + m + t) & 0xffffffff, s[0], s[1], s[2], (s[3] + t) & 0xffffffff, s[4], s[5], s[6]]
+
+        ss = [(ss[i] + s[i]) & 0xffffffff for i in range(8)]
+
+    return b"".join(int.to_bytes(a, 4, "big") for a in ss)
+
+
 # BYTE MANIPULATION HELPERS
 def bytes_to_num(b):
     return int.from_bytes(b, "big")
@@ -397,7 +430,7 @@ def handle_cert_verify(cert_verify_data, rsa, msgs_so_far):
     signature_len = bytes_to_num(cert_verify_data[6:8])
     signature = cert_verify_data[8: 8+signature_len]
 
-    message = b" " * 64 + b"TLS 1.3, server CertificateVerify" + b"\x00" + hashlib.sha256(msgs_so_far).digest()
+    message = b" " * 64 + b"TLS 1.3, server CertificateVerify" + b"\x00" + sha256(msgs_so_far)
 
     try:
         pss.new(rsa).verify(SHA256.new(message), signature)
@@ -484,12 +517,10 @@ our_secret_point_x = multiply_num_on_ec_point(our_ecdh_privkey, server_ecdh_pubk
 our_secret = num_to_bytes(our_secret_point_x, 32)
 print(f"    Our common ECDH secret is: {our_secret.hex()}, deriving keys")
 
-# the sha256 from empty msg is used
-derive_start_hash = hashlib.sha256(b"").digest()
 early_secret = hkdf_extract(data=b"\x00" * 32, key=b"")
-preextractsec = derive_secret(b"derived", data=derive_start_hash, key=early_secret, hash_len=32)
+preextractsec = derive_secret(b"derived", data=sha256(b""), key=early_secret, hash_len=32)
 handshake_secret = hkdf_extract(data=our_secret, key=preextractsec)
-hello_hash = hashlib.sha256(client_hello + server_hello).digest()
+hello_hash = sha256(client_hello + server_hello)
 server_hs_secret = derive_secret(b"s hs traffic", data=hello_hash, key=handshake_secret, hash_len=32)
 server_write_key = derive_secret(b"key", data=b"", key=server_hs_secret, hash_len=16)
 server_write_iv = derive_secret(b"iv", data=b"", key=server_hs_secret, hash_len=12)
@@ -562,7 +593,7 @@ send_tls(s, CHANGE_CIPHER, change_cipher)
 # All client messages beyond this point are encrypted
 
 msgs_so_far = msgs_so_far + finished
-msgs_sha256 = hashlib.sha256(msgs_so_far).digest()
+msgs_sha256 = sha256(msgs_so_far)
 client_finish_val = hmac.new(client_finished_key, msgs_sha256, hashlib.sha256).digest()
 print(f"    Client finish value {client_finish_val.hex()}")
 
@@ -575,10 +606,10 @@ client_seq_num += 1
 print("Handshake finished, regenerating secrets for application data")
 
 ###########################
-msgs_so_far_hash = hashlib.sha256(msgs_so_far).digest()
+msgs_so_far_hash = sha256(msgs_so_far)
 
 # rederive application secrets
-premaster_secret = derive_secret(b"derived", data=derive_start_hash, key=handshake_secret, hash_len=32)
+premaster_secret = derive_secret(b"derived", data=sha256(b""), key=handshake_secret, hash_len=32)
 master_secret = hkdf_extract(data=b"\x00" * 32, key=premaster_secret)
 server_secret = derive_secret(b"s ap traffic", data=msgs_so_far_hash, key=master_secret, hash_len=32)
 server_write_key = derive_secret(b"key", data=b"", key=server_secret, hash_len=16)
@@ -601,7 +632,7 @@ server_seq_num = 0
 
 ###########################
 # the rest is just for fun
-request = b"""GET / HTTP/1.1\r\nHost: AAAA\r\nConnection: close\r\n\r\n"""
+request = b"""HEAD / HTTP/1.1\r\nHost: github.com\r\nConnection: close\r\n\r\n"""
 print("Sending", request)
 
 encrypted_msg = do_authenticated_encryption(client_write_key, client_write_iv,
@@ -624,7 +655,7 @@ while True:
 
         server_seq_num += 1
         if msg_type == APPLICATION_DATA:
-            print(f"Got: {msg.decode(errors='ignore')}")
+            print(msg.decode(errors='ignore'))
         elif msg_type == HANDSHAKE and msg[0] == b"\x04":
             print(f"New session ticket: {msg.hex()}")
         elif msg_type == ALERT:
