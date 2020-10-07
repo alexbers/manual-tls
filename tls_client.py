@@ -5,17 +5,14 @@ from Crypto.Hash import SHA256
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-import hashlib
-import hmac
 import socket
-import sys
 
 HOST = "github.com"
 PORT = 443
 
 TIMEOUT = 10
 
-# tls 1.2 for legacy reasons, tls 1.3 will be send in extensions as required
+# in tls 1.3 the version tls 1.2 is sent sometimes for legacy reasons
 LEGACY_TLS_VERSION = b"\x03\x03"
 
 TLS_AES_128_GCM_SHA256 = b"\x13\x01"
@@ -26,13 +23,64 @@ HANDSHAKE = b"\x16"
 APPLICATION_DATA = b"\x17"
 
 
+# SYMMETRIC CIPHERS
+def xor(a, b):
+    return bytes(a[i] ^ b[i] for i in range(len(a)))
+
+
+# CRYPTOGRAPHIC HASH FUNCTIONS
+def rotr(num, count):
+    return num >> count | num << (32 - count)
+
+
+def sha256(msg):
+    K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
+    msg += b"\x80" + b"\x00" * ((64-(len(msg) + 1 + 8)) % 64) + int.to_bytes(len(msg)*8, 8, "big")
+
+    ss = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+
+    for pos in range(0, len(msg), 64):
+        chunk = msg[pos:pos + 64]
+
+        w = [int.from_bytes(chunk[4*i:4*i+4], "big") for i in range(16)]
+        for i in range(16, 64):
+            a = rotr(w[i-15], 7) ^ rotr(w[i-15], 18) ^ (w[i-15] >> 3)
+            b = rotr(w[i-2], 17) ^ rotr(w[i-2], 19) ^ (w[i-2] >> 10)
+            w.append((a + b + w[i-16] + w[i-7]) & 0xffffffff)
+
+        s = ss.copy()
+        for i in range(64):
+            c = (s[4] & s[5]) ^ ((s[4] ^ 0xffffffff) & s[6])
+            t = K[i] + s[7] + c + w[i] + (rotr(s[4], 6) ^ rotr(s[4], 11) ^ rotr(s[4], 25))
+            q = rotr(s[0], 2) ^ rotr(s[0], 13) ^ rotr(s[0], 22)
+            m = (s[0] & s[1]) ^ (s[0] & s[2]) ^ (s[1] & s[2])
+            s = [(q + m + t) & 0xffffffff, s[0], s[1], s[2], (s[3] + t) & 0xffffffff, s[4], s[5], s[6]]
+
+        ss = [(ss[i] + s[i]) & 0xffffffff for i in range(8)]
+
+    return b"".join(int.to_bytes(a, 4, "big") for a in ss)
+
+
+def hmac_sha256(key, msg):
+    BLOCK_SIZE = 512 // 8
+
+    ipad = b"\x36" * BLOCK_SIZE
+    opad = b"\x5c" * BLOCK_SIZE
+
+    if len(key) <= BLOCK_SIZE:
+        key = key + b"\x00" * (BLOCK_SIZE - len(key))
+    else:
+        key = sha256(key)
+
+    return sha256(xor(key, opad) + sha256(xor(key, ipad) + msg))
+
+
 # ELLIPTIC CURVE FUNCTIONS
 def egcd(a, b):
     if a == 0:
         return b, 0, 1
-    else:
-        g, y, x = egcd(b % a, a)
-        return g, x - (b // a) * y, y
+    g, y, x = egcd(b % a, a)
+    return g, x - (b // a) * y, y
 
 
 def mod_inv(a, p):
@@ -41,8 +89,7 @@ def mod_inv(a, p):
     g, x, y = egcd(a, p)
     if g != 1:
         raise ValueError("Failed to compute modular inverse")
-    else:
-        return x % p
+    return x % p
 
 
 def add_two_ec_points(p1_x, p1_y, p2_x, p2_y, a, p):
@@ -82,39 +129,6 @@ def multiply_num_on_ec_point(num, g_x, g_y, a, p):
     return result_x, result_y
 
 
-# CRYPTOGRAPHIC HASH FUNCTIONS
-def rotr(num, count):
-    return num >> count | num << (32 - count)
-
-
-def sha256(msg):
-    K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
-    msg += b"\x80" + b"\x00" * ((64-(len(msg) + 1 + 8)) % 64) + int.to_bytes(len(msg)*8, 8, "big")
-
-    ss = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
-
-    for pos in range(0, len(msg), 64):
-        chunk = msg[pos:pos + 64]
-
-        w = [int.from_bytes(chunk[4*i:4*i+4], "big") for i in range(16)]
-        for i in range(16, 64):
-            a = rotr(w[i-15], 7) ^ rotr(w[i-15], 18) ^ (w[i-15] >> 3)
-            b = rotr(w[i-2], 17) ^ rotr(w[i-2], 19) ^ (w[i-2] >> 10)
-            w.append((a + b + w[i-16] + w[i-7]) & 0xffffffff)
-
-        s = ss.copy()
-        for i in range(64):
-            c = (s[4] & s[5]) ^ ((s[4] ^ 0xffffffff) & s[6])
-            t = K[i] + s[7] + c + w[i] + (rotr(s[4], 6) ^ rotr(s[4], 11) ^ rotr(s[4], 25))
-            q = rotr(s[0], 2) ^ rotr(s[0], 13) ^ rotr(s[0], 22)
-            m = (s[0] & s[1]) ^ (s[0] & s[2]) ^ (s[1] & s[2])
-            s = [(q + m + t) & 0xffffffff, s[0], s[1], s[2], (s[3] + t) & 0xffffffff, s[4], s[5], s[6]]
-
-        ss = [(ss[i] + s[i]) & 0xffffffff for i in range(8)]
-
-    return b"".join(int.to_bytes(a, 4, "big") for a in ss)
-
-
 # BYTE MANIPULATION HELPERS
 def bytes_to_num(b):
     return int.from_bytes(b, "big")
@@ -125,13 +139,6 @@ def num_to_bytes(num, bytes_len=None):
     if bytes_len is None:
         bytes_len = (num.bit_length() + 7) // 8
     return int.to_bytes(num, bytes_len, "big")
-
-
-def xor(a, b):
-    ans = bytearray()
-    for i in range(len(a)):
-        ans.append(a[i] ^ b[i])
-    return bytes(ans)
 
 
 # NETWORK AND LOW LEVEL TLS PROTOCOL HELPERS
@@ -168,8 +175,7 @@ def send_tls(s, rec_type, msg):
 
 # MESSAGE AUTENTICATION CODES AND HASHING HELPERS
 def hkdf_extract(data, key):
-    hmac_digest = hmac.new(key, data, hashlib.sha256).digest()
-    return bytes(hmac_digest)
+    return hmac_sha256(key, data)
 
 
 def hkdf_expand(data, key, hash_len):
@@ -177,7 +183,7 @@ def hkdf_expand(data, key, hash_len):
 
     i = 1
     while len(sha256_result) < hash_len:
-        sha256_result += hmac.new(key, sha256_result[-32:] + data + num_to_bytes(i, 1), hashlib.sha256).digest()
+        sha256_result += hmac_sha256(key, sha256_result[-32:] + data + num_to_bytes(i, 1))
         i += 1
     sha256_result = sha256_result[:hash_len]
 
@@ -448,8 +454,8 @@ def handle_finished(finished_data, server_finished_key, msgs_so_far):
     verify_data_len = bytes_to_num(finished_data[1:4])
     verify_data = finished_data[4:4+verify_data_len]
 
-    msgs_digest = hashlib.sha256(msgs_so_far).digest()
-    hmac_digest = hmac.new(server_finished_key, msgs_digest, hashlib.sha256).digest()
+    msgs_digest = sha256(msgs_so_far)
+    hmac_digest = hmac_sha256(server_finished_key, msgs_digest)
 
     return verify_data == hmac_digest
 
@@ -499,7 +505,7 @@ rec_type, server_hello = recv_tls(s)
 if rec_type == ALERT:
     print("Server sent us ALERT, it probably doesn't support " +
           "TLS_AES_128_GCM_SHA256 algo")
-    sys.exit(1)
+    exit(1)
 
 assert rec_type == HANDSHAKE
 
@@ -594,7 +600,7 @@ send_tls(s, CHANGE_CIPHER, change_cipher)
 
 msgs_so_far = msgs_so_far + finished
 msgs_sha256 = sha256(msgs_so_far)
-client_finish_val = hmac.new(client_finished_key, msgs_sha256, hashlib.sha256).digest()
+client_finish_val = hmac_sha256(client_finished_key, msgs_sha256)
 print(f"    Client finish value {client_finish_val.hex()}")
 
 print("Handshake: sending an encrypted finished msg")
