@@ -30,11 +30,12 @@ def rotr(num, count):
     return num >> count | num << (32 - count)
 
 
-# SYMMETRIC CIPHERS
 def xor(a, b):
     return bytes(a[i] ^ b[i] for i in range(len(a)))
 
 
+# SYMMETRIC CIPHERS
+# S_BOX is some permutation of range(256), used by AES
 S_BOX = [
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -77,7 +78,7 @@ def aes128_expand_key(key):
 
 
 def aes128_encrypt(key, plaintext):
-    TWOTIMES = [2*num if 2*num < 256 else (2*num ^ 27) & 0xFF for num in range(256)]
+    TWOTIMES = [2*num if 2*num < 256 else (2*num ^ 27) - 256 for num in range(256)]
 
     enc_keys = aes128_expand_key(key)
 
@@ -274,35 +275,26 @@ def mod_inv(a, p):
 
 def add_two_ec_points(p1_x, p1_y, p2_x, p2_y, a, p):
     if p1_x == p2_x and p1_y == p2_y:
-        s = (3 * (p1_x*p1_x) + a) * mod_inv(2 * p2_y, p)
+        s = (3*p1_x*p1_x + a) * mod_inv(2*p2_y, p)
     elif p1_x != p2_x:
         s = (p1_y - p2_y) * mod_inv(p1_x - p2_x, p)
     else:
         raise NotImplementedError
 
     x = s*s - p1_x - p2_x
-    y = -p1_y + s * (p1_x - x)
-
+    y = -p1_y + s*(p1_x - x)
     return x % p, y % p
 
 
 def multiply_num_on_ec_point(num, g_x, g_y, a, p):
-    result_x, result_y = None, None
-    cur_x, cur_y = g_x, g_y
-
+    x, y = None, None
     while num:
         bit = num % 2
-        num >>= 1
-
         if bit == 1:
-            if result_x is None and result_y is None:
-                result_x, result_y = cur_x, cur_y
-            else:
-                result_x, result_y = add_two_ec_points(result_x, result_y, cur_x, cur_y, a, p)
-        cur_x, cur_y = add_two_ec_points(cur_x, cur_y, cur_x, cur_y, a, p)
-
-    assert result_x
-    return result_x, result_y
+            x, y = add_two_ec_points(x, y, g_x, g_y, a, p) if x else (g_x, g_y)
+        g_x, g_y = add_two_ec_points(g_x, g_y, g_x, g_y, a, p)
+        num >>= 1
+    return x, y
 
 
 # AUTHENTIATED ENCRYPTION HELPERS
@@ -618,7 +610,6 @@ our_ecdh_pubkey_x, our_ecdh_pubkey_y = (
 print(f"    Client random: {client_random.hex()}")
 print(f"    Our ECDH (Elliptic-curve Diffie-Hellman) private key: {our_ecdh_privkey}")
 print(f"    Our ECDH public key: x={our_ecdh_pubkey_x} y={our_ecdh_pubkey_y}")
-
 
 print("Generating the client hello")
 client_hello = gen_client_hello(client_random, our_ecdh_pubkey_x, our_ecdh_pubkey_y)
