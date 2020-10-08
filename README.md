@@ -7,6 +7,10 @@ single file.
 Implemented algos: AES128 with GCM, SHA256, HMAC and Diffie-Hellman on
 Elliptic Curves
 
+This program will help you to find answers on "What if ...?" questions about
+the TLS protocol. Also this project can be used to test corner cases in your
+favorite TLS server implementation.
+
 This is educational project. The goal is to make the code as simple and
 as readable as possible. The security and performance are not priorities of
 this project. Please, don't use it in your production projects, **it
@@ -31,15 +35,10 @@ and SHA256 for hashing. Also we don't support advanced features like client's
 authentication, session tickets, etc. We even do not support server's
 certificate chain validation.
 
-This program will help you to find answers on "What if ...?" questions about
-the TLS protocol. Also this project can be used to test corner cases in your
-favorite TLS server implementation.
-
 ## Links ##
 
 * RFC about TLS 1.3: https://tools.ietf.org/html/rfc8446
 * Russian description of TLS protocol: https://tls.dxdt.ru/tls.html
-
 
 ## Requirements ##
 
