@@ -4,6 +4,8 @@ HOST = "habr.com"
 PORT = 443
 TIMEOUT = 10
 
+REQUEST = b"HEAD /ru/company/habr/blog/522330/ HTTP/1.1\r\nHost: habr.com\r\nConnection: close\r\n\r\n"
+
 # in tls 1.3 the version tls 1.2 is sent sometimes for legacy reasons
 LEGACY_TLS_VERSION = b"\x03\x03"
 
@@ -55,18 +57,18 @@ AES_ROUNDS = 10
 
 
 def aes128_expand_key(key):
-    RCON = [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36]
+    RCON = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36]
 
     enc_keys = [[0, 0, 0, 0] for i in range(AES_ROUNDS + 1)]
     enc_keys[0] = [int.from_bytes(key[i:i + 4], "big") for i in [0, 4, 8, 12]]
 
     for t in range(1, AES_ROUNDS + 1):
         prev_key = enc_keys[t-1]
-        enc_keys[t][0] = ((S_BOX[(prev_key[3] >> 16) & 0xFF] << 24) ^
-                          (S_BOX[(prev_key[3] >>  8) & 0xFF] << 16) ^
-                          (S_BOX[ prev_key[3]        & 0xFF] <<  8) ^
-                          (S_BOX[(prev_key[3] >> 24) & 0xFF]      ) ^
-                          (RCON[t] << 24) ^ prev_key[0])
+        enc_keys[t][0] = ((S_BOX[(prev_key[3] >> 8*2) & 0xFF] << 8*3) ^
+                          (S_BOX[(prev_key[3] >> 8*1) & 0xFF] << 8*2) ^
+                          (S_BOX[(prev_key[3] >> 8*0) & 0xFF] << 8*1) ^
+                          (S_BOX[(prev_key[3] >> 8*3) & 0xFF] << 8*0) ^
+                          (RCON[t-1] << 8*3) ^ prev_key[0])
 
         for i in range(1, 4):
             enc_keys[t][i] = enc_keys[t][i-1] ^ prev_key[i]
@@ -75,30 +77,33 @@ def aes128_expand_key(key):
 
 
 def aes128_encrypt(key, plaintext):
-    XTIME = [2*a for a in range(128)] + [2*a ^ 27 for a in range(128)]
+    TWOTIMES = [2*num if 2*num < 256 else (2*num ^ 27) & 0xFF for num in range(256)]
+
     enc_keys = aes128_expand_key(key)
 
     t = [(int.from_bytes(plaintext[4*i:4*i + 4], "big") ^ enc_keys[0][i]) for i in range(4)]
     for r in range(1, AES_ROUNDS):
-        t = [[S_BOX[(t[ i         ] >> 24) & 0xFF],
-              S_BOX[(t[(i + 1) % 4] >> 16) & 0xFF],
-              S_BOX[(t[(i + 2) % 4] >>  8) & 0xFF],
-              S_BOX[ t[(i + 3) % 4]        & 0xFF]] for i in range(4)]
+        t = [[S_BOX[(t[(i + 0) % 4] >> 8*3) & 0xFF],
+              S_BOX[(t[(i + 1) % 4] >> 8*2) & 0xFF],
+              S_BOX[(t[(i + 2) % 4] >> 8*1) & 0xFF],
+              S_BOX[(t[(i + 3) % 4] >> 8*0) & 0xFF]] for i in range(4)]
 
-        t = [[c[1] ^ c[2] ^ c[3] ^ XTIME[c[0] ^ c[1]],
-              c[0] ^ c[2] ^ c[3] ^ XTIME[c[1] ^ c[2]],
-              c[0] ^ c[1] ^ c[3] ^ XTIME[c[2] ^ c[3]],
-              c[0] ^ c[1] ^ c[2] ^ XTIME[c[3] ^ c[0]]] for c in t]
+        t = [[c[1] ^ c[2] ^ c[3] ^ TWOTIMES[c[0] ^ c[1]],
+              c[0] ^ c[2] ^ c[3] ^ TWOTIMES[c[1] ^ c[2]],
+              c[0] ^ c[1] ^ c[3] ^ TWOTIMES[c[2] ^ c[3]],
+              c[0] ^ c[1] ^ c[2] ^ TWOTIMES[c[3] ^ c[0]]] for c in t]
 
         t = [bytes_to_num(t[i]) ^ enc_keys[r][i] for i in range(4)]
 
-    result = []
+    result = b""
     for i in range(4):
-        result.append((S_BOX[(t[ i         ] >> 24) & 0xFF] ^ (enc_keys[-1][i] >> 24)) & 0xFF)
-        result.append((S_BOX[(t[(i + 1) % 4] >> 16) & 0xFF] ^ (enc_keys[-1][i] >> 16)) & 0xFF)
-        result.append((S_BOX[(t[(i + 2) % 4] >>  8) & 0xFF] ^ (enc_keys[-1][i] >>  8)) & 0xFF)
-        result.append((S_BOX[(t[(i + 3) % 4]      ) & 0xFF] ^ (enc_keys[-1][i]      )) & 0xFF)
-    return bytes(result)
+        result += bytes([
+            (S_BOX[(t[(i + 0) % 4] >> 8*3) & 0xFF] ^ (enc_keys[-1][i] >> 8*3)) & 0xFF,
+            (S_BOX[(t[(i + 1) % 4] >> 8*2) & 0xFF] ^ (enc_keys[-1][i] >> 8*2)) & 0xFF,
+            (S_BOX[(t[(i + 2) % 4] >> 8*1) & 0xFF] ^ (enc_keys[-1][i] >> 8*1)) & 0xFF,
+            (S_BOX[(t[(i + 3) % 4] >> 8*0) & 0xFF] ^ (enc_keys[-1][i] >> 8*0)) & 0xFF
+        ])
+    return result
 
 
 def aes128_ctr_encrypt(key, msg, nonce, counter_start_val):
@@ -157,11 +162,11 @@ def calc_pretag(key, encrypted_msg, associated_data):
 
 
 def aes128_gcm_decrypt(key, msg, nonce, associated_data):
-    encrypted_msg, tag = msg[:-16], msg[-16:]
+    TAG_LEN = 16
+    encrypted_msg, tag = msg[:-TAG_LEN], msg[-TAG_LEN:]
 
     pretag = calc_pretag(key, encrypted_msg, associated_data)
     check_tag = aes128_ctr_encrypt(key, pretag, nonce, counter_start_val=1)
-
     if check_tag != tag:
         raise ValueError("Decrypt error, bad tag")
 
@@ -179,14 +184,16 @@ def aes128_gcm_encrypt(key, msg, nonce, associated_data):
 
 # CRYPTOGRAPHIC HASH FUNCTIONS AND MESSAGE AUTHENTICATION CODES
 def sha256(msg):
-    K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-         0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-         0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-         0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-         0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-         0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-         0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-         0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
+    K = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ]
 
     msg += b"\x80" + b"\x00" * ((64-(len(msg) + 1 + 8)) % 64) + int.to_bytes(len(msg)*8, 8, "big")
 
@@ -294,41 +301,8 @@ def multiply_num_on_ec_point(num, g_x, g_y, a, p):
                 result_x, result_y = add_two_ec_points(result_x, result_y, cur_x, cur_y, a, p)
         cur_x, cur_y = add_two_ec_points(cur_x, cur_y, cur_x, cur_y, a, p)
 
-    if result_x is None or result_y is None:
-        raise NotImplementedError
+    assert result_x
     return result_x, result_y
-
-
-# NETWORK AND LOW LEVEL TLS PROTOCOL HELPERS
-def recv_num_bytes(s, num):
-    ret = b""
-
-    while len(ret) < num:
-        data = s.recv(min(4096, num - len(ret)))
-        if not data:
-            raise BrokenPipeError
-            break
-        ret += data
-
-    assert len(ret) == num
-    return ret
-
-
-def recv_tls(s):
-    rec_type = recv_num_bytes(s, 1)
-
-    tls_version = recv_num_bytes(s, 2)
-    assert tls_version == LEGACY_TLS_VERSION
-
-    rec_len = bytes_to_num(recv_num_bytes(s, 2))
-    rec = recv_num_bytes(s, rec_len)
-
-    return rec_type, rec
-
-
-def send_tls(s, rec_type, msg):
-    tls_record = rec_type + LEGACY_TLS_VERSION + num_to_bytes(len(msg), 2) + msg
-    s.sendall(tls_record)
 
 
 # AUTHENTIATED ENCRYPTION HELPERS
@@ -359,6 +333,37 @@ def decrypt_msg(server_write_key, server_write_nonce, seq_num, encrypted_msg):
     return msg_type, msg_data
 
 
+# NETWORK AND LOW LEVEL TLS PROTOCOL HELPERS
+def recv_num_bytes(s, num):
+    ret = b""
+
+    while len(ret) < num:
+        data = s.recv(min(4096, num - len(ret)))
+        if not data:
+            raise BrokenPipeError
+        ret += data
+
+    assert len(ret) == num
+    return ret
+
+
+def recv_tls(s):
+    rec_type = recv_num_bytes(s, 1)
+
+    tls_version = recv_num_bytes(s, 2)
+    assert tls_version == LEGACY_TLS_VERSION
+
+    rec_len = bytes_to_num(recv_num_bytes(s, 2))
+    rec = recv_num_bytes(s, rec_len)
+
+    return rec_type, rec
+
+
+def send_tls(s, rec_type, msg):
+    tls_record = rec_type + LEGACY_TLS_VERSION + num_to_bytes(len(msg), 2) + msg
+    s.sendall(tls_record)
+
+
 def recv_tls_and_decrypt(s, key, nonce, seq_num, rec_type=APPLICATION_DATA, enc_rec_type=HANDSHAKE):
     got_rec_type, encrypted_msg = recv_tls(s)
     assert got_rec_type == rec_type
@@ -373,14 +378,8 @@ def recv_tls_and_decrypt(s, key, nonce, seq_num, rec_type=APPLICATION_DATA, enc_
 def gen_client_hello(client_random, ecdh_pubkey_x, ecdh_pubkey_y):
     CLIENT_HELLO = b"\x01"
 
-    client_version = LEGACY_TLS_VERSION  # tls 1.0, compat with old implementations
-
-    session_id_len = b"\x00"
     session_id = b""
 
-    cipher_suites_len = num_to_bytes(2, 2)  # only TLS_AES_128_GCM_SHA256
-
-    compression_method_len = b"\x01"
     compression_method = b"\x00"  # no compression
 
     # make extensions
@@ -421,10 +420,10 @@ def gen_client_hello(client_random, ecdh_pubkey_x, ecdh_pubkey_y):
     extensions = (supported_version_extension + signature_algos_extension +
                   supported_groups_extension + key_share_extension)
 
-    client_hello_data = (client_version + client_random +
-                         session_id_len + session_id + cipher_suites_len +
-                         TLS_AES_128_GCM_SHA256 +
-                         compression_method_len + compression_method +
+    client_hello_data = (LEGACY_TLS_VERSION + client_random +
+                         num_to_bytes(len(session_id), 1) + session_id +
+                         num_to_bytes(len(TLS_AES_128_GCM_SHA256), 2) + TLS_AES_128_GCM_SHA256 +
+                         num_to_bytes(len(compression_method), 1) + compression_method +
                          num_to_bytes(len(extensions), 2)) + extensions
 
     client_hello_len_bytes = num_to_bytes(len(client_hello_data), 3)
@@ -432,13 +431,13 @@ def gen_client_hello(client_random, ecdh_pubkey_x, ecdh_pubkey_y):
 
     print(f"    Type is the client hello: {CLIENT_HELLO.hex()}")
     print(f"    Length is {len(client_hello_data)}: {client_hello_len_bytes.hex()}")
-    print(f"    Legacy client version is TLS 1.2: {client_version.hex()}")
+    print(f"    Legacy client version is TLS 1.2: {LEGACY_TLS_VERSION.hex()}")
     print(f"    Client random: {client_random.hex()}")
-    print(f"    Session id len is 0: {session_id_len.hex()}")
+    print(f"    Session id len is 0: {num_to_bytes(len(session_id), 1).hex()}")
     print(f"    Session id: {session_id.hex()}")
-    print(f"    Cipher suites len is 2: {cipher_suites_len.hex()}")
+    print(f"    Cipher suites len is 2: {num_to_bytes(len(TLS_AES_128_GCM_SHA256), 2)}")
     print(f"    Cipher suite is TLS_AES_128_GCM_SHA256: {TLS_AES_128_GCM_SHA256.hex()}")
-    print(f"    Compression method len is 1: {compression_method_len.hex()}")
+    print(f"    Compression method len is 1: {num_to_bytes(len(compression_method), 1).hex()}")
     print(f"    Compression method is no compression: {compression_method.hex()}")
     print(f"    Extensions len is {len(extensions)}: {num_to_bytes(len(extensions), 2).hex()}")
     print(f"    Extension type is supported_versions: {supported_versions.hex()}")
@@ -474,15 +473,15 @@ def handle_server_hello(server_hello):
     server_random = server_hello[6:38]
 
     session_id_len = bytes_to_num(server_hello[38:39])
-    session_id = server_hello[39: 39 + session_id_len]
+    session_id = server_hello[39:39 + session_id_len]
 
-    cipher_suite = server_hello[39 + session_id_len: 39 + session_id_len + 2]
+    cipher_suite = server_hello[39 + session_id_len:39 + session_id_len + 2]
     assert cipher_suite == TLS_AES_128_GCM_SHA256
 
-    compression_method = server_hello[39 + session_id_len + 2: 39 + session_id_len + 3]
+    compression_method = server_hello[39 + session_id_len + 2:39 + session_id_len + 3]
 
-    extensions_length = bytes_to_num(server_hello[39 + session_id_len + 3: 39 + session_id_len + 3 + 2])
-    extensions = server_hello[39 + session_id_len + 3 + 2: 39 + session_id_len + 3 + 2 + extensions_length]
+    extensions_length = bytes_to_num(server_hello[39 + session_id_len + 3:39 + session_id_len + 3 + 2])
+    extensions = server_hello[39 + session_id_len + 3 + 2:39 + session_id_len + 3 + 2 + extensions_length]
 
     public_ec_key = b""
     ptr = 0
@@ -570,9 +569,9 @@ def handle_cert_verify(cert_verify_data, rsa, msgs_so_far):
 
     try:
         pss.new(rsa).verify(SHA256.new(message), signature)
-        return True
     except ValueError:
         return False
+    return True
 
 
 def handle_finished(finished_data, server_finished_key, msgs_so_far):
@@ -612,8 +611,10 @@ SECP256R1_G = (0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c29
 
 client_random = b"\xAB" * 32
 our_ecdh_privkey = 42
-our_ecdh_pubkey_x, our_ecdh_pubkey_y = multiply_num_on_ec_point(our_ecdh_privkey,
-                                                                SECP256R1_G[0], SECP256R1_G[1],                                                                SECP256R1_A, SECP256R1_P)
+our_ecdh_pubkey_x, our_ecdh_pubkey_y = (
+    multiply_num_on_ec_point(our_ecdh_privkey, SECP256R1_G[0], SECP256R1_G[1], SECP256R1_A, SECP256R1_P)
+)
+
 print(f"    Client random: {client_random.hex()}")
 print(f"    Our ECDH (Elliptic-curve Diffie-Hellman) private key: {our_ecdh_privkey}")
 print(f"    Our ECDH public key: x={our_ecdh_pubkey_x} y={our_ecdh_pubkey_y}")
@@ -637,7 +638,6 @@ assert rec_type == HANDSHAKE
 
 server_random, session_id, server_ecdh_pubkey_x, server_ecdh_pubkey_y = handle_server_hello(server_hello)
 print(f"    Server ECDH public key: x={server_ecdh_pubkey_x} y={server_ecdh_pubkey_y}")
-
 
 ###########################
 print("Receiving a change cipher msg, all communication will be encrypted")
@@ -670,7 +670,6 @@ print("    client_write_key", client_write_key.hex())
 print("    client_write_iv", client_write_iv.hex())
 print("    client_finished_key", client_finished_key.hex())
 
-
 client_seq_num = 0  # for use in authenticated encryption
 server_seq_num = 0
 
@@ -689,7 +688,6 @@ server_seq_num += 1
 
 certs = handle_server_cert(server_cert)
 print("    Got %d certs" % len(certs))
-
 # rsa = RSA.import_key(certs[0])
 
 ###########################
@@ -763,11 +761,10 @@ server_seq_num = 0
 
 ###########################
 # the rest is just for fun
-request = b"""HEAD /ru/company/habr/blog/522330/ HTTP/1.1\r\nHost: habr.com\r\nConnection: close\r\n\r\n"""
-print(f"Sending {request}")
+print(f"Sending {REQUEST}")
 
 encrypted_msg = do_authenticated_encryption(client_write_key, client_write_iv,
-                                            client_seq_num, APPLICATION_DATA, request)
+                                            client_seq_num, APPLICATION_DATA, REQUEST)
 send_tls(s, APPLICATION_DATA, encrypted_msg)
 client_seq_num += 1
 
@@ -775,25 +772,28 @@ print("Receiving an answer")
 while True:
     try:
         rec_type, server_encrypted_msg = recv_tls(s)
+        assert rec_type == APPLICATION_DATA
     except BrokenPipeError:
         print("Connection closed on TCP level")
         break
 
-    if rec_type == APPLICATION_DATA:
-        msg_type, msg = decrypt_msg(server_write_key, server_write_iv,
-                                    server_seq_num, server_encrypted_msg)
+    msg_type, msg = decrypt_msg(server_write_key, server_write_iv,
+                                server_seq_num, server_encrypted_msg)
+    server_seq_num += 1
 
-        server_seq_num += 1
-        if msg_type == APPLICATION_DATA:
-            print(msg.decode(errors='ignore'))
-        elif msg_type == HANDSHAKE and msg[0] == b"\x04":
+    if msg_type == APPLICATION_DATA:
+        print(msg.decode(errors='ignore'))
+    elif msg_type == HANDSHAKE:
+        NEW_SESSION_TICKET = 4
+        if msg[0] == NEW_SESSION_TICKET:
             print(f"New session ticket: {msg.hex()}")
-        elif msg_type == ALERT:
-            alert_level, alert_description = msg
+    elif msg_type == ALERT:
+        alert_level, alert_description = msg
 
-            print(f"Got alert level: {alert_level}, description: {alert_description}")
-            if alert_description == 0:
-                print("Server sent close_notify, no waiting for more data")
-                break
+        print(f"Got alert level: {alert_level}, description: {alert_description}")
+        CLOSE_NOTIFY = 0
+        if alert_description == CLOSE_NOTIFY:
+            print("Server sent close_notify, no waiting for more data")
+            break
     else:
-        print("Got msg with unknown rec_type")
+        print("Got msg with unknown msg_type", msg_type)
