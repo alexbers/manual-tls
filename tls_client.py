@@ -348,14 +348,12 @@ def send_tls(s, rec_type, msg):
     s.sendall(tls_record)
 
 
-def recv_tls_and_decrypt(s, key, nonce, seq_num, rec_type=APPLICATION_DATA, enc_rec_type=HANDSHAKE):
-    got_rec_type, encrypted_msg = recv_tls(s)
-    assert got_rec_type == rec_type
+def recv_tls_and_decrypt(s, key, nonce, seq_num):
+    rec_type, encrypted_msg = recv_tls(s)
+    assert rec_type == APPLICATION_DATA
 
-    got_enc_rec_type, msg = decrypt_msg(key, nonce, seq_num, encrypted_msg)
-    assert got_enc_rec_type == enc_rec_type
-
-    return msg
+    msg_type, msg = decrypt_msg(key, nonce, seq_num, encrypted_msg)
+    return msg_type, msg
 
 
 # PACKET GENERATORS AND HANDLERS
@@ -658,7 +656,8 @@ server_seq_num = 0
 
 ###########################
 print("Receiving encrypted extensions")
-encrypted_extensions = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+rec_type, encrypted_extensions = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+assert rec_type == HANDSHAKE
 server_seq_num += 1
 
 print(f"    Encrypted_extensions: {encrypted_extensions.hex()}, parsing skipped")
@@ -666,7 +665,8 @@ handle_encrypted_extensions(encrypted_extensions)
 
 ###########################
 print("Receiving server certificates")
-server_cert = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+rec_type, server_cert = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+assert rec_type == HANDSHAKE
 server_seq_num += 1
 
 certs = handle_server_cert(server_cert)
@@ -675,7 +675,8 @@ print("    Got %d certs" % len(certs))
 
 ###########################
 print("Receiving server verify certificate")
-cert_verify = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+rec_type, cert_verify = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+assert rec_type == HANDSHAKE
 server_seq_num += 1
 
 msgs_so_far = client_hello + server_hello + encrypted_extensions + server_cert
@@ -686,7 +687,8 @@ print("    Certificate verifying skipped")
 
 ###########################
 print("Receiving server finished")
-finished = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+rec_type, finished = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+assert rec_type == HANDSHAKE
 server_seq_num += 1
 
 msgs_so_far = msgs_so_far + cert_verify
@@ -754,23 +756,19 @@ client_seq_num += 1
 print("Receiving an answer")
 while True:
     try:
-        rec_type, server_encrypted_msg = recv_tls(s)
-        assert rec_type == APPLICATION_DATA
+        rec_type, msg = recv_tls_and_decrypt(s, server_write_key, server_write_iv, server_seq_num)
+        server_seq_num += 1
     except BrokenPipeError:
         print("Connection closed on TCP level")
         break
 
-    msg_type, msg = decrypt_msg(server_write_key, server_write_iv,
-                                server_seq_num, server_encrypted_msg)
-    server_seq_num += 1
-
-    if msg_type == APPLICATION_DATA:
+    if rec_type == APPLICATION_DATA:
         print(msg.decode(errors='ignore'))
-    elif msg_type == HANDSHAKE:
+    elif rec_type == HANDSHAKE:
         NEW_SESSION_TICKET = 4
         if msg[0] == NEW_SESSION_TICKET:
             print(f"New session ticket: {msg.hex()}")
-    elif msg_type == ALERT:
+    elif rec_type == ALERT:
         alert_level, alert_description = msg
 
         print(f"Got alert level: {alert_level}, description: {alert_description}")
@@ -779,4 +777,4 @@ while True:
             print("Server sent close_notify, no waiting for more data")
             break
     else:
-        print("Got msg with unknown msg_type", msg_type)
+        print("Got msg with unknown rec_type", rec_type)
