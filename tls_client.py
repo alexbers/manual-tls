@@ -222,7 +222,7 @@ def sha256(msg):
     return b"".join(int.to_bytes(a, 4, "big") for a in ss)
 
 
-def hmac_sha256(key, msg):
+def hmac_sha256(key, data):
     BLOCK_SIZE = 512 // 8
 
     ipad = b"\x36" * BLOCK_SIZE
@@ -233,30 +233,22 @@ def hmac_sha256(key, msg):
     else:
         key = sha256(key)
 
-    return sha256(xor(key, opad) + sha256(xor(key, ipad) + msg))
+    return sha256(xor(key, opad) + sha256(xor(key, ipad) + data))
 
 
-def hkdf_extract(data, key):
-    return hmac_sha256(key, data)
-
-
-def hkdf_expand(data, key, hash_len):
-    sha256_result = bytearray()
-
-    i = 1
-    while len(sha256_result) < hash_len:
-        sha256_result += hmac_sha256(key, sha256_result[-32:] + data + num_to_bytes(i, 1))
-        i += 1
-    return bytes(sha256_result[:hash_len])
-
-
-def derive_secret(label, data, key, hash_len):
+def derive_secret(label, key, data, hash_len):
     full_label = b"tls13 " + label
     packed_data = (num_to_bytes(hash_len, 2) + num_to_bytes(len(full_label), 1) +
                    full_label + num_to_bytes(len(data), 1) + data)
 
-    secret = hkdf_expand(data=packed_data, key=key, hash_len=hash_len)
-    return secret
+    secret = bytearray()
+
+    i = 1
+    while len(secret) < hash_len:
+        secret += hmac_sha256(key, secret[-32:] + packed_data + num_to_bytes(i, 1))
+        i += 1
+
+    return bytes(secret[:hash_len])
 
 
 # ELLIPTIC CURVE FUNCTIONS
@@ -500,7 +492,7 @@ def handle_server_hello(server_hello):
 
     print(f"    Type is the server hello: {server_hello[:1].hex()}")
     print(f"    Length is {bytes_to_num(server_hello_len)}: {server_hello_len.hex()}")
-    print(f"    Legacy server version is TLS 1.2: {server_hello_len.hex()}")
+    print(f"    Legacy server version is TLS 1.2: {server_version.hex()}")
     print(f"    Server random: {server_random.hex()}")
     print(f"    Session id len is {session_id_len}: {server_hello[38:39].hex()}")
     print(f"    Session id: {session_id.hex()}")
@@ -640,18 +632,18 @@ our_secret_point_x = multiply_num_on_ec_point(our_ecdh_privkey, server_ecdh_pubk
 our_secret = num_to_bytes(our_secret_point_x, 32)
 print(f"    Our common ECDH secret is: {our_secret.hex()}, deriving keys")
 
-early_secret = hkdf_extract(data=b"\x00" * 32, key=b"")
-preextractsec = derive_secret(b"derived", data=sha256(b""), key=early_secret, hash_len=32)
-handshake_secret = hkdf_extract(data=our_secret, key=preextractsec)
+early_secret = hmac_sha256(key=b"", data=b"\x00" * 32)
+preextractsec = derive_secret(b"derived", key=early_secret, data=sha256(b""), hash_len=32)
+handshake_secret = hmac_sha256(key=preextractsec, data=our_secret)
 hello_hash = sha256(client_hello + server_hello)
-server_hs_secret = derive_secret(b"s hs traffic", data=hello_hash, key=handshake_secret, hash_len=32)
-server_write_key = derive_secret(b"key", data=b"", key=server_hs_secret, hash_len=16)
-server_write_iv = derive_secret(b"iv", data=b"", key=server_hs_secret, hash_len=12)
-server_finished_key = derive_secret(b"finished", data=b"", key=server_hs_secret, hash_len=32)
-client_hs_secret = derive_secret(b"c hs traffic", data=hello_hash, key=handshake_secret, hash_len=32)
-client_write_key = derive_secret(b"key", data=b"", key=client_hs_secret, hash_len=16)
-client_write_iv = derive_secret(b"iv", data=b"", key=client_hs_secret, hash_len=12)
-client_finished_key = derive_secret(b"finished", data=b"", key=client_hs_secret, hash_len=32)
+server_hs_secret = derive_secret(b"s hs traffic", key=handshake_secret, data=hello_hash, hash_len=32)
+server_write_key = derive_secret(b"key", key=server_hs_secret, data=b"", hash_len=16)
+server_write_iv = derive_secret(b"iv", key=server_hs_secret, data=b"", hash_len=12)
+server_finished_key = derive_secret(b"finished", key=server_hs_secret, data=b"", hash_len=32)
+client_hs_secret = derive_secret(b"c hs traffic", key=handshake_secret, data=hello_hash, hash_len=32)
+client_write_key = derive_secret(b"key", key=client_hs_secret, data=b"", hash_len=16)
+client_write_iv = derive_secret(b"iv", key=client_hs_secret, data=b"", hash_len=12)
+client_finished_key = derive_secret(b"finished", key=client_hs_secret, data=b"", hash_len=32)
 
 print("    handshake_secret", handshake_secret.hex())
 print("    server_write_key", server_write_key.hex())
@@ -729,7 +721,7 @@ msgs_so_far_hash = sha256(msgs_so_far)
 
 # rederive application secrets
 premaster_secret = derive_secret(b"derived", data=sha256(b""), key=handshake_secret, hash_len=32)
-master_secret = hkdf_extract(data=b"\x00" * 32, key=premaster_secret)
+master_secret = hmac_sha256(key=premaster_secret, data=b"\x00" * 32)
 server_secret = derive_secret(b"s ap traffic", data=msgs_so_far_hash, key=master_secret, hash_len=32)
 server_write_key = derive_secret(b"key", data=b"", key=server_secret, hash_len=16)
 server_write_iv = derive_secret(b"iv", data=b"", key=server_secret, hash_len=12)
