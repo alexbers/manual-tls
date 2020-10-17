@@ -152,19 +152,18 @@ def calc_pretag(key, encrypted_msg, associated_data):
     h = bytes_to_num(aes128_encrypt(key, b"\x00" * 16))
     data = (associated_data + v + encrypted_msg + u +
             num_to_bytes(len(associated_data)*8, 8) + num_to_bytes(len(encrypted_msg)*8, 8))
-
     return num_to_bytes(ghash(h, data), 16)
 
 
 def aes128_gcm_decrypt(key, msg, nonce, associated_data):
     TAG_LEN = 16
+
     encrypted_msg, tag = msg[:-TAG_LEN], msg[-TAG_LEN:]
 
     pretag = calc_pretag(key, encrypted_msg, associated_data)
     check_tag = aes128_ctr_encrypt(key, pretag, nonce, counter_start_val=1)
     if check_tag != tag:
         raise ValueError("Decrypt error, bad tag")
-
     return aes128_ctr_decrypt(key, encrypted_msg, nonce, counter_start_val=2)
 
 
@@ -173,7 +172,6 @@ def aes128_gcm_encrypt(key, msg, nonce, associated_data):
 
     pretag = calc_pretag(key, encrypted_msg, associated_data)
     tag = aes128_ctr_encrypt(key, pretag, nonce, counter_start_val=1)
-
     return encrypted_msg + tag
 
 
@@ -217,16 +215,14 @@ def sha256(msg):
 
 def hmac_sha256(key, data):
     BLOCK_SIZE = 512 // 8
-
-    ipad = b"\x36" * BLOCK_SIZE
-    opad = b"\x5c" * BLOCK_SIZE
+    IPAD = b"\x36" * BLOCK_SIZE
+    OPAD = b"\x5c" * BLOCK_SIZE
 
     if len(key) <= BLOCK_SIZE:
         key += b"\x00" * (BLOCK_SIZE - len(key))
     else:
         key = sha256(key)
-
-    return sha256(xor(key, opad) + sha256(xor(key, ipad) + data))
+    return sha256(xor(key, OPAD) + sha256(xor(key, IPAD) + data))
 
 
 def derive_secret(label, key, data, hash_len):
