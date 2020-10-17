@@ -8,7 +8,6 @@ REQUEST = b"HEAD /ru/company/habr/blog/522330/ HTTP/1.1\r\nHost: habr.com\r\nCon
 
 # in tls 1.3 the version tls 1.2 is sent for better compatibility
 LEGACY_TLS_VERSION = b"\x03\x03"
-
 TLS_AES_128_GCM_SHA256 = b"\x13\x01"
 
 CHANGE_CIPHER = b"\x14"
@@ -51,6 +50,7 @@ AES_SBOX = [
     105, 217, 142, 148, 155, 30, 135, 233, 206, 85, 40, 223, 140, 161, 137, 13, 191, 230, 66, 104,
     65, 153, 45, 15, 176, 84, 187, 22
 ]
+
 AES_ROUNDS = 10
 
 
@@ -58,7 +58,7 @@ def aes128_expand_key(key):
     RCON = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36]
 
     enc_keys = [[0, 0, 0, 0] for i in range(AES_ROUNDS + 1)]
-    enc_keys[0] = [int.from_bytes(key[i:i + 4], "big") for i in [0, 4, 8, 12]]
+    enc_keys[0] = [bytes_to_num(key[i:i + 4]) for i in [0, 4, 8, 12]]
 
     for t in range(1, AES_ROUNDS + 1):
         prev_key = enc_keys[t-1]
@@ -78,7 +78,7 @@ def aes128_encrypt(key, plaintext):
 
     enc_keys = aes128_expand_key(key)
 
-    t = [(int.from_bytes(plaintext[4*i:4*i + 4], "big") ^ enc_keys[0][i]) for i in range(4)]
+    t = [bytes_to_num(plaintext[4*i:4*i + 4]) ^ enc_keys[0][i] for i in range(4)]
     for r in range(1, AES_ROUNDS):
         t = [[AES_SBOX[(t[(i + 0) % 4] >> 8*3) & 0xFF],
               AES_SBOX[(t[(i + 1) % 4] >> 8*2) & 0xFF],
@@ -197,7 +197,7 @@ def sha256(msg):
     for pos in range(0, len(msg), 64):
         chunk = msg[pos:pos + 64]
 
-        w = [int.from_bytes(chunk[4*i:4*i+4], "big") for i in range(16)]
+        w = [bytes_to_num(chunk[4*i:4*i+4]) for i in range(16)]
         for i in range(16, 64):
             a = rotr(w[i-15], 7) ^ rotr(w[i-15], 18) ^ (w[i-15] >> 3)
             b = rotr(w[i-2], 17) ^ rotr(w[i-2], 19) ^ (w[i-2] >> 10)
