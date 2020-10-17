@@ -98,7 +98,6 @@ def aes128_encrypt(key, plaintext):
         AES_SBOX[(t[(i + 2) % 4] >> 8*1) & 0xFF] ^ (enc_keys[-1][i] >> 8*1) & 0xFF,
         AES_SBOX[(t[(i + 3) % 4] >> 8*0) & 0xFF] ^ (enc_keys[-1][i] >> 8*0) & 0xFF
     ]) for i in range(4)]
-
     return b"".join(result)
 
 
@@ -179,22 +178,22 @@ def aes128_gcm_encrypt(key, msg, nonce, associated_data):
 
 
 # CRYPTOGRAPHIC HASH FUNCTIONS AND MESSAGE AUTHENTICATION CODES
-def sha256(msg):
-    K = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
-    ]
+SHA256_K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+]
 
-    msg += b"\x80" + b"\x00" * ((64-(len(msg) + 1 + 8)) % 64) + int.to_bytes(len(msg)*8, 8, "big")
+
+def sha256(msg):
+    msg += b"\x80" + b"\x00" * ((64-(len(msg) + 1 + 8)) % 64) + num_to_bytes(len(msg)*8, 8)
 
     ss = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
-
     for pos in range(0, len(msg), 64):
         chunk = msg[pos:pos + 64]
 
@@ -207,14 +206,13 @@ def sha256(msg):
         s = ss.copy()
         for i in range(64):
             c = (s[4] & s[5]) ^ ((s[4] ^ 0xffffffff) & s[6])
-            t = K[i] + s[7] + c + w[i] + (rotr(s[4], 6) ^ rotr(s[4], 11) ^ rotr(s[4], 25))
+            t = SHA256_K[i] + s[7] + c + w[i] + (rotr(s[4], 6) ^ rotr(s[4], 11) ^ rotr(s[4], 25))
             q = rotr(s[0], 2) ^ rotr(s[0], 13) ^ rotr(s[0], 22)
             m = (s[0] & s[1]) ^ (s[0] & s[2]) ^ (s[1] & s[2])
             s = [(q + m + t) & 0xffffffff, s[0], s[1], s[2], (s[3] + t) & 0xffffffff, s[4], s[5], s[6]]
 
         ss = [(ss[i] + s[i]) & 0xffffffff for i in range(8)]
-
-    return b"".join(int.to_bytes(a, 4, "big") for a in ss)
+    return b"".join(num_to_bytes(a, 4) for a in ss)
 
 
 def hmac_sha256(key, data):
@@ -237,12 +235,10 @@ def derive_secret(label, key, data, hash_len):
                    full_label + num_to_bytes(len(data), 1) + data)
 
     secret = bytearray()
-
     i = 1
     while len(secret) < hash_len:
         secret += hmac_sha256(key, secret[-32:] + packed_data + num_to_bytes(i, 1))
         i += 1
-
     return bytes(secret[:hash_len])
 
 
@@ -345,15 +341,12 @@ def gen_client_hello(client_random, ecdh_pubkey_x, ecdh_pubkey_y):
     CLIENT_HELLO = b"\x01"
 
     session_id = b""
-
     compression_method = b"\x00"  # no compression
 
-    # make extensions
     supported_versions = b"\x00\x2b"
     supported_versions_length = b"\x00\x03"
     another_supported_versions_length = b"\x02"
     tls1_3_version = b"\x03\x04"
-
     supported_version_extension = (supported_versions + supported_versions_length +
                                    another_supported_versions_length + tls1_3_version)
 
@@ -361,7 +354,6 @@ def gen_client_hello(client_random, ecdh_pubkey_x, ecdh_pubkey_y):
     signature_algos_length = b"\x00\x04"
     another_signature_algos_length = b"\x00\x02"
     rsa_pss_rsae_sha256_algo = b"\x08\x04"
-
     signature_algos_extension = (signature_algos + signature_algos_length +
                                  another_signature_algos_length + rsa_pss_rsae_sha256_algo)
 
@@ -369,7 +361,6 @@ def gen_client_hello(client_random, ecdh_pubkey_x, ecdh_pubkey_y):
     supported_groups_length = b"\x00\x04"
     another_supported_groups_length = b"\x00\x02"
     secp256r1_group = b"\x00\x17"
-
     supported_groups_extension = (supported_groups + supported_groups_length +
                                   another_supported_groups_length + secp256r1_group)
 
@@ -379,7 +370,6 @@ def gen_client_hello(client_random, ecdh_pubkey_x, ecdh_pubkey_y):
     key_share_length = num_to_bytes(len(ecdh_pubkey) + 4 + 2, 2)
     another_key_share_length = num_to_bytes(len(ecdh_pubkey) + 4, 2)
     key_exchange_len = num_to_bytes(len(ecdh_pubkey), 2)
-
     key_share_extension = (key_share + key_share_length + another_key_share_length +
                            secp256r1_group + key_exchange_len + ecdh_pubkey)
 
@@ -699,9 +689,8 @@ client_seq_num += 1
 print("Handshake finished, regenerating secrets for application data")
 
 ###########################
-msgs_so_far_hash = sha256(msgs_so_far)
-
 # rederive application secrets
+msgs_so_far_hash = sha256(msgs_so_far)
 premaster_secret = derive_secret(b"derived", data=sha256(b""), key=handshake_secret, hash_len=32)
 master_secret = hmac_sha256(key=premaster_secret, data=b"\x00" * 32)
 server_secret = derive_secret(b"s ap traffic", data=msgs_so_far_hash, key=master_secret, hash_len=32)
