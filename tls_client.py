@@ -278,9 +278,9 @@ def multiply_num_on_ec_point(num, g_x, g_y, a, p):
 # AUTHENTIATED ENCRYPTION HELPERS
 def do_authenticated_encryption(key, nonce_base, seq_num, msg_type, payload):
     TAG_LEN = 16
-    nonce = xor(nonce_base, num_to_bytes(seq_num, 12))
 
     payload += msg_type
+    nonce = xor(nonce_base, num_to_bytes(seq_num, 12))
     data = APPLICATION_DATA + LEGACY_TLS_VERSION + num_to_bytes(len(payload)+TAG_LEN, 2)
 
     encrypted_msg = aes128_gcm_encrypt(key, payload, nonce, associated_data=data)
@@ -300,7 +300,6 @@ def do_authenticated_decryption(key, nonce_start, seq_num, msg_type, payload):
 # NETWORK AND LOW LEVEL TLS PROTOCOL HELPERS
 def recv_num_bytes(s, num):
     ret = bytearray()
-
     while len(ret) < num:
         data = s.recv(min(32768, num - len(ret)))
         if not data:
