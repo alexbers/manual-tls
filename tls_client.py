@@ -6,7 +6,7 @@ TIMEOUT = 10
 
 REQUEST = b"HEAD /ru/company/habr/blog/522330/ HTTP/1.1\r\nHost: habr.com\r\nConnection: close\r\n\r\n"
 
-# in tls 1.3 the version tls 1.2 is sent sometimes for legacy reasons
+# in tls 1.3 the version tls 1.2 is sent for better compatibility
 LEGACY_TLS_VERSION = b"\x03\x03"
 
 TLS_AES_128_GCM_SHA256 = b"\x13\x01"
@@ -19,11 +19,11 @@ APPLICATION_DATA = b"\x17"
 
 # BYTE MANIPULATION HELPERS
 def bytes_to_num(b):
-    return int.from_bytes(b, "big", signed=False)
+    return int.from_bytes(b, "big")
 
 
 def num_to_bytes(num, bytes_len):
-    return int.to_bytes(num, bytes_len, "big", signed=False)
+    return int.to_bytes(num, bytes_len, "big")
 
 
 def rotr(num, count):
@@ -31,28 +31,25 @@ def rotr(num, count):
 
 
 def xor(a, b):
-    return bytes(a[i] ^ b[i] for i in range(len(a)))
+    return bytes(i ^ j for i, j in zip(a, b))
 
 
 # SYMMETRIC CIPHERS
-# S_BOX is some permutation of range(256), used by AES
-S_BOX = [
-    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
-    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
-    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
-    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
-    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
-    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
-    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
-    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
-    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
-    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
-    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
-    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
-    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
-    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
-    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
-    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
+# AES_SBOX is some permutation of numbers 0-255
+AES_SBOX = [
+    99, 124, 119, 123, 242, 107, 111, 197, 48, 1, 103, 43, 254, 215, 171, 118, 202, 130, 201, 125,
+    250, 89, 71, 240, 173, 212, 162, 175, 156, 164, 114, 192, 183, 253, 147, 38, 54, 63, 247, 204,
+    52, 165, 229, 241, 113, 216, 49, 21, 4, 199, 35, 195, 24, 150, 5, 154, 7, 18, 128, 226, 235,
+    39, 178, 117, 9, 131, 44, 26, 27, 110, 90, 160, 82, 59, 214, 179, 41, 227, 47, 132, 83, 209,
+    0, 237, 32, 252, 177, 91, 106, 203, 190, 57, 74, 76, 88, 207, 208, 239, 170, 251, 67, 77, 51,
+    133, 69, 249, 2, 127, 80, 60, 159, 168, 81, 163, 64, 143, 146, 157, 56, 245, 188, 182, 218, 33,
+    16, 255, 243, 210, 205, 12, 19, 236, 95, 151, 68, 23, 196, 167, 126, 61, 100, 93, 25, 115, 96,
+    129, 79, 220, 34, 42, 144, 136, 70, 238, 184, 20, 222, 94, 11, 219, 224, 50, 58, 10, 73, 6, 36,
+    92, 194, 211, 172, 98, 145, 149, 228, 121, 231, 200, 55, 109, 141, 213, 78, 169, 108, 86, 244,
+    234, 101, 122, 174, 8, 186, 120, 37, 46, 28, 166, 180, 198, 232, 221, 116, 31, 75, 189, 139,
+    138, 112, 62, 181, 102, 72, 3, 246, 14, 97, 53, 87, 185, 134, 193, 29, 158, 225, 248, 152, 17,
+    105, 217, 142, 148, 155, 30, 135, 233, 206, 85, 40, 223, 140, 161, 137, 13, 191, 230, 66, 104,
+    65, 153, 45, 15, 176, 84, 187, 22
 ]
 AES_ROUNDS = 10
 
@@ -65,29 +62,28 @@ def aes128_expand_key(key):
 
     for t in range(1, AES_ROUNDS + 1):
         prev_key = enc_keys[t-1]
-        enc_keys[t][0] = ((S_BOX[(prev_key[3] >> 8*2) & 0xFF] << 8*3) ^
-                          (S_BOX[(prev_key[3] >> 8*1) & 0xFF] << 8*2) ^
-                          (S_BOX[(prev_key[3] >> 8*0) & 0xFF] << 8*1) ^
-                          (S_BOX[(prev_key[3] >> 8*3) & 0xFF] << 8*0) ^
+        enc_keys[t][0] = ((AES_SBOX[(prev_key[3] >> 8*2) & 0xFF] << 8*3) ^
+                          (AES_SBOX[(prev_key[3] >> 8*1) & 0xFF] << 8*2) ^
+                          (AES_SBOX[(prev_key[3] >> 8*0) & 0xFF] << 8*1) ^
+                          (AES_SBOX[(prev_key[3] >> 8*3) & 0xFF] << 8*0) ^
                           (RCON[t-1] << 8*3) ^ prev_key[0])
 
         for i in range(1, 4):
             enc_keys[t][i] = enc_keys[t][i-1] ^ prev_key[i]
-
     return enc_keys
 
 
 def aes128_encrypt(key, plaintext):
-    TWOTIMES = [2*num if 2*num < 256 else (2*num ^ 27) - 256 for num in range(256)]
+    TWOTIMES = [2*num if 2*num < 256 else 2*num & 0xff ^ 27 for num in range(256)]
 
     enc_keys = aes128_expand_key(key)
 
     t = [(int.from_bytes(plaintext[4*i:4*i + 4], "big") ^ enc_keys[0][i]) for i in range(4)]
     for r in range(1, AES_ROUNDS):
-        t = [[S_BOX[(t[(i + 0) % 4] >> 8*3) & 0xFF],
-              S_BOX[(t[(i + 1) % 4] >> 8*2) & 0xFF],
-              S_BOX[(t[(i + 2) % 4] >> 8*1) & 0xFF],
-              S_BOX[(t[(i + 3) % 4] >> 8*0) & 0xFF]] for i in range(4)]
+        t = [[AES_SBOX[(t[(i + 0) % 4] >> 8*3) & 0xFF],
+              AES_SBOX[(t[(i + 1) % 4] >> 8*2) & 0xFF],
+              AES_SBOX[(t[(i + 2) % 4] >> 8*1) & 0xFF],
+              AES_SBOX[(t[(i + 3) % 4] >> 8*0) & 0xFF]] for i in range(4)]
 
         t = [[c[1] ^ c[2] ^ c[3] ^ TWOTIMES[c[0] ^ c[1]],
               c[0] ^ c[2] ^ c[3] ^ TWOTIMES[c[1] ^ c[2]],
@@ -96,21 +92,20 @@ def aes128_encrypt(key, plaintext):
 
         t = [bytes_to_num(t[i]) ^ enc_keys[r][i] for i in range(4)]
 
-    result = b""
-    for i in range(4):
-        result += bytes([
-            (S_BOX[(t[(i + 0) % 4] >> 8*3) & 0xFF] ^ (enc_keys[-1][i] >> 8*3)) & 0xFF,
-            (S_BOX[(t[(i + 1) % 4] >> 8*2) & 0xFF] ^ (enc_keys[-1][i] >> 8*2)) & 0xFF,
-            (S_BOX[(t[(i + 2) % 4] >> 8*1) & 0xFF] ^ (enc_keys[-1][i] >> 8*1)) & 0xFF,
-            (S_BOX[(t[(i + 3) % 4] >> 8*0) & 0xFF] ^ (enc_keys[-1][i] >> 8*0)) & 0xFF
-        ])
-    return result
+    result = [bytes([
+        AES_SBOX[(t[(i + 0) % 4] >> 8*3) & 0xFF] ^ (enc_keys[-1][i] >> 8*3) & 0xFF,
+        AES_SBOX[(t[(i + 1) % 4] >> 8*2) & 0xFF] ^ (enc_keys[-1][i] >> 8*2) & 0xFF,
+        AES_SBOX[(t[(i + 2) % 4] >> 8*1) & 0xFF] ^ (enc_keys[-1][i] >> 8*1) & 0xFF,
+        AES_SBOX[(t[(i + 3) % 4] >> 8*0) & 0xFF] ^ (enc_keys[-1][i] >> 8*0) & 0xFF
+    ]) for i in range(4)]
+
+    return b"".join(result)
 
 
 def aes128_ctr_encrypt(key, msg, nonce, counter_start_val):
     BLOCK_SIZE = 16
 
-    ans = bytearray()
+    ans = []
     counter = counter_start_val
     for s in range(0, len(msg), BLOCK_SIZE):
         chunk = msg[s:s+BLOCK_SIZE]
@@ -119,10 +114,10 @@ def aes128_ctr_encrypt(key, msg, nonce, counter_start_val):
         encrypted_chunk_nonce = aes128_encrypt(key, chunk_nonce)
 
         decrypted_chunk = xor(chunk, encrypted_chunk_nonce)
-        ans += decrypted_chunk
+        ans.append(decrypted_chunk)
 
         counter += 1
-    return bytes(ans)
+    return b"".join(ans)
 
 
 def aes128_ctr_decrypt(key, msg, nonce, counter_start_val):
@@ -281,8 +276,7 @@ def add_two_ec_points(p1_x, p1_y, p2_x, p2_y, a, p):
 def multiply_num_on_ec_point(num, g_x, g_y, a, p):
     x, y = None, None
     while num:
-        bit = num % 2
-        if bit == 1:
+        if num & 1:
             x, y = add_two_ec_points(x, y, g_x, g_y, a, p) if x else (g_x, g_y)
         g_x, g_y = add_two_ec_points(g_x, g_y, g_x, g_y, a, p)
         num >>= 1
@@ -294,7 +288,7 @@ def do_authenticated_encryption(key, nonce_base, seq_num, msg_type, payload):
     TAG_LEN = 16
     nonce = xor(nonce_base, num_to_bytes(seq_num, 12))
 
-    payload = payload + msg_type
+    payload += msg_type
     data = APPLICATION_DATA + LEGACY_TLS_VERSION + num_to_bytes(len(payload)+TAG_LEN, 2)
 
     encrypted_msg = aes128_gcm_encrypt(key, payload, nonce, associated_data=data)
@@ -311,35 +305,25 @@ def do_authenticated_decryption(key, nonce_start, seq_num, msg_type, payload):
     return msg_type, msg_data
 
 
-def decrypt_msg(server_write_key, server_write_nonce, seq_num, encrypted_msg):
-    msg_type, msg_data = do_authenticated_decryption(server_write_key, server_write_nonce,
-                                                     seq_num, APPLICATION_DATA, encrypted_msg)
-    return msg_type, msg_data
-
-
 # NETWORK AND LOW LEVEL TLS PROTOCOL HELPERS
 def recv_num_bytes(s, num):
-    ret = b""
+    ret = bytearray()
 
     while len(ret) < num:
-        data = s.recv(min(4096, num - len(ret)))
+        data = s.recv(min(32768, num - len(ret)))
         if not data:
             raise BrokenPipeError
         ret += data
-
-    assert len(ret) == num
-    return ret
+    return bytes(ret)
 
 
 def recv_tls(s):
     rec_type = recv_num_bytes(s, 1)
-
     tls_version = recv_num_bytes(s, 2)
     assert tls_version == LEGACY_TLS_VERSION
 
     rec_len = bytes_to_num(recv_num_bytes(s, 2))
     rec = recv_num_bytes(s, rec_len)
-
     return rec_type, rec
 
 
@@ -352,7 +336,7 @@ def recv_tls_and_decrypt(s, key, nonce, seq_num):
     rec_type, encrypted_msg = recv_tls(s)
     assert rec_type == APPLICATION_DATA
 
-    msg_type, msg = decrypt_msg(key, nonce, seq_num, encrypted_msg)
+    msg_type, msg = do_authenticated_decryption(key, nonce, seq_num, APPLICATION_DATA, encrypted_msg)
     return msg_type, msg
 
 
@@ -530,7 +514,6 @@ def handle_server_cert(server_cert_data):
 
         certificates.append(cert_string_left[7: 7 + cert_len])
         cert_string_left = cert_string_left[4 + cert_entry_len:]
-
     return certificates
 
 
@@ -549,10 +532,10 @@ def handle_cert_verify(cert_verify_data, rsa, msgs_so_far):
 
     message = b" " * 64 + b"TLS 1.3, server CertificateVerify" + b"\x00" + sha256(msgs_so_far)
 
-    try:
-        pss.new(rsa).verify(SHA256.new(message), signature)
-    except ValueError:
-        return False
+    # try:
+    #     pss.new(rsa).verify(SHA256.new(message), signature)
+    # except ValueError:
+    #     return False
     return True
 
 
@@ -671,7 +654,6 @@ server_seq_num += 1
 
 certs = handle_server_cert(server_cert)
 print("    Got %d certs" % len(certs))
-# rsa = RSA.import_key(certs[0])
 
 ###########################
 print("Receiving server verify certificate")
@@ -680,10 +662,8 @@ assert rec_type == HANDSHAKE
 server_seq_num += 1
 
 msgs_so_far = client_hello + server_hello + encrypted_extensions + server_cert
+cert_ok = handle_cert_verify(cert_verify, None, msgs_so_far)
 print("    Certificate verifying skipped")
-# cert_ok = handle_cert_verify(cert_verify, rsa, msgs_so_far)
-# if not cert_ok:
-#     print("    Warning: Certificate signature is wrong!")
 
 ###########################
 print("Receiving server finished")
