@@ -439,8 +439,8 @@ def handle_server_hello(server_hello):
             ptr += extension_length + 4
             continue
         group = extensions[ptr+4: ptr+6]
-        secp256r1_group = b"\x00\x17"
-        assert group == secp256r1_group
+        SECP256R1_GROUP = b"\x00\x17"
+        assert group == SECP256R1_GROUP
         key_exchange_len = bytes_to_num(extensions[ptr+6: ptr+8])
 
         public_ec_key = extensions[ptr+8:ptr+8+key_exchange_len]
@@ -630,7 +630,7 @@ assert rec_type == HANDSHAKE
 server_seq_num += 1
 
 certs = handle_server_cert(server_cert)
-print("    Got %d certs" % len(certs))
+print(f"    Got {len(certs)} certs")
 
 ###########################
 print("Receiving server verify certificate")
@@ -657,8 +657,7 @@ else:
 
 ###########################
 print("Handshake: sending a change cipher msg")
-change_cipher = gen_change_cipher()
-send_tls(s, CHANGE_CIPHER, change_cipher)
+send_tls(s, CHANGE_CIPHER, gen_change_cipher())
 
 ###########################
 # All client messages beyond this point are encrypted
