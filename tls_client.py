@@ -34,6 +34,8 @@ def xor(a, b):
 
 
 # SYMMETRIC CIPHERS
+AES_ROUNDS = 10
+
 # AES_SBOX is some permutation of numbers 0-255
 AES_SBOX = [
     99, 124, 119, 123, 242, 107, 111, 197, 48, 1, 103, 43, 254, 215, 171, 118, 202, 130, 201, 125,
@@ -50,8 +52,6 @@ AES_SBOX = [
     105, 217, 142, 148, 155, 30, 135, 233, 206, 85, 40, 223, 140, 161, 137, 13, 191, 230, 66, 104,
     65, 153, 45, 15, 176, 84, 187, 22
 ]
-
-AES_ROUNDS = 10
 
 
 def aes128_expand_key(key):
@@ -128,19 +128,16 @@ def mutliply_blocks(x, y):
     for i in range(128):
         if x & (1 << (127 - i)):
             z ^= y
-        if y & 1:
-            y = (y >> 1) ^ (0xe1 << 120)
-        else:
-            y = y >> 1
+        y = (y >> 1) ^ (0xe1 << 120) if y & 1 else y >> 1
     return z
 
 
 def ghash(h, data):
-    BLOCK_SIZE = 16
+    CHUNK_LEN = 16
 
     y = 0
-    for pos in range(0, len(data), BLOCK_SIZE):
-        chunk = bytes_to_num(data[pos: pos + BLOCK_SIZE])
+    for pos in range(0, len(data), CHUNK_LEN):
+        chunk = bytes_to_num(data[pos: pos + CHUNK_LEN])
         y = mutliply_blocks(y ^ chunk, h)
     return y
 
@@ -247,9 +244,7 @@ def egcd(a, b):
 
 
 def mod_inv(a, p):
-    if a < 0:
-        return p - egcd(-a, p)[0]
-    return egcd(a, p)[0]
+    return egcd(a, p)[0] if a >= 0 else p - egcd(-a, p)[0]
 
 
 def add_two_ec_points(p1_x, p1_y, p2_x, p2_y, a, p):
@@ -301,7 +296,7 @@ def do_authenticated_decryption(key, nonce_start, seq_num, msg_type, payload):
 def recv_num_bytes(s, num):
     ret = bytearray()
     while len(ret) < num:
-        data = s.recv(min(32768, num - len(ret)))
+        data = s.recv(min(4096, num - len(ret)))
         if not data:
             raise BrokenPipeError
         ret += data
@@ -611,13 +606,10 @@ client_write_key = derive_secret(b"key", key=client_hs_secret, data=b"", hash_le
 client_write_iv = derive_secret(b"iv", key=client_hs_secret, data=b"", hash_len=12)
 client_finished_key = derive_secret(b"finished", key=client_hs_secret, data=b"", hash_len=32)
 
-print("    handshake_secret", handshake_secret.hex())
-print("    server_write_key", server_write_key.hex())
-print("    server_write_iv", server_write_iv.hex())
-print("    server_finished_key", server_finished_key.hex())
-print("    client_write_key", client_write_key.hex())
-print("    client_write_iv", client_write_iv.hex())
-print("    client_finished_key", client_finished_key.hex())
+print(f"    server_write_key {server_write_key.hex()} server_write_iv {server_write_iv.hex()}")
+print(f"    server_finished_key {server_finished_key.hex()}")
+print(f"    client_write_key {client_write_key.hex()} client_write_iv {client_write_iv.hex()}")
+print(f"    client_finished_key {client_finished_key.hex()}")
 
 client_seq_num = 0  # for use in authenticated encryption
 server_seq_num = 0
@@ -695,14 +687,8 @@ client_secret = derive_secret(b"c ap traffic", data=msgs_so_far_hash, key=master
 client_write_key = derive_secret(b"key", data=b"", key=client_secret, hash_len=16)
 client_write_iv = derive_secret(b"iv", data=b"", key=client_secret, hash_len=12)
 
-print("    premaster_secret", premaster_secret.hex())
-print("    master_secret", master_secret.hex())
-print("    server_secret", server_secret.hex())
-print("    server_write_key", server_write_key.hex())
-print("    server_write_iv", server_write_iv.hex())
-print("    client_secret", client_secret.hex())
-print("    client_write_key", client_write_key.hex())
-print("    client_write_iv", client_write_iv.hex())
+print(f"    server_write_key {server_write_key.hex()} server_write_iv {server_write_iv.hex()}")
+print(f"    client_write_key {client_write_key.hex()} client_write_iv {client_write_iv.hex()}")
 
 # reset sequence numbers
 client_seq_num = 0
