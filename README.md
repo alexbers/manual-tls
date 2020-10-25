@@ -4,35 +4,35 @@ Makes HTTPS connection with TLS 1.3 in 100% Python. The only used import is
 **socket**! All required crypto algorithms are implemented manually in a
 single file.
 
-Implemented algos: AES128 with GCM, SHA256, HMAC and Diffie-Hellman on
+Implemented algorithms: AES128 with GCM, SHA256, HMAC, and Diffie-Hellman on
 Elliptic Curves
 
-This program will help you to find answers on "What if ...?" questions about
-the TLS protocol. Also this project can be used to test corner cases in your
+This program will help you to find answers to "What if ...?" questions about
+the TLS protocol. Also, this project can be used to test corner cases in your
 favorite TLS server implementation.
 
-This is educational project. The goal is to make the code as simple and
-as readable as possible. The security and performance are not priorities of
+This is an educational project. The goal is to make the code as simple and
+as readable as possible. Security and performance are not the priorities of
 this project. Please, don't use it in your production projects, **it
 is not secure**.
 
 ## Motivation ##
 
-Have you ever wandered what happens when you type an HTTPS address in
+Have you ever wondered what happens when you type an HTTPS address in
 the browser? What data is sent? What algorithms are involved to make the
 connection secure?
 
 Many programs use libraries for making HTTPS connections like *NSS* or
 *OpenSSL*. These libraries conceal protocol details behind their API and make
-things magic-like. Their code is very difficult to read. The aim of this
-project is to **reveal this magic**, showing how the things look like in
+things magic-like. Their code is very difficult to read. This project aims to
+**reveal this magic**, showing how things look like in
 the **low level**.
 
 We don't try to implement all possible key-exchange and encryption protocols,
 we implement only the most standard ones: TLS 1.3 with Elliptic Curve
-Diffie-Hellman for key exchange, AES-128 in Galois/Counter mode for encryption
-and SHA256 for hashing. Also we don't support advanced features like client's
-authentication, session tickets, etc. We even do not support server's
+Diffie-Hellman for key exchange, AES-128 in Galois/Counter mode for encryption,
+and SHA256 for hashing. Also, we don't support advanced features like client's
+authentication, session tickets, etc. We even do not support the server's
 certificate chain validation.
 
 ## Links ##
